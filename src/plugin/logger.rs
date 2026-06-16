@@ -1,20 +1,12 @@
-#[cfg(test)]
-mod tests;
-
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
-use crate::component::Component;
+use crate::plugin::module::Module;
 
-#[derive(Default)]
-pub struct Logger;
+pub struct LoggerModule;
 
-impl Component for Logger {
-    fn name(&self) -> &'static str {
-        "Logger"
-    }
-
-    fn init(&mut self) {
+impl LoggerModule {
+    pub fn init() -> Self {
         let debug = /* cfg!(debug_assertions) */ true;
         let other_crates = false;
 
@@ -47,5 +39,9 @@ impl Component for Logger {
             env!("CARGO_PKG_NAME"),
             env!("CARGO_PKG_VERSION")
         );
+
+        Self
     }
 }
+
+impl Module for LoggerModule {}

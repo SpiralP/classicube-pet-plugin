@@ -9,7 +9,9 @@ crate-type = ["cdylib"]
 
 [dependencies]
 anyhow = "=1.0.102"
+borsh = { version = "=1.6.1", features = ["derive"] }
 classicube-helpers = { git = "https://github.com/SpiralP/rust-classicube-helpers.git" }
+classicube-relay = { git = "https://github.com/SpiralP/rust-classicube-relay.git" }
 classicube-sys = "=6.0.4"
 tracing = "=0.1.44"
 tracing-subscriber = { version = "=0.3.23", features = ["env-filter"] }
