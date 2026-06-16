@@ -4,12 +4,13 @@ pub mod logger;
 pub mod module;
 pub mod pet;
 pub mod relay;
+pub mod runtime;
 
 use std::cell::RefCell;
 
 use crate::plugin::{
     command::CommandModule, custom_models::CustomModelsModule, logger::LoggerModule,
-    module::Module, pet::PetModule, relay::RelayModule,
+    module::Module, pet::PetModule, relay::RelayModule, runtime::RuntimeModule,
 };
 
 thread_local!(
@@ -17,6 +18,7 @@ thread_local!(
 );
 
 struct MainModule {
+    runtime: RuntimeModule,
     logger: LoggerModule,
     command: CommandModule,
     relay: RelayModule,
@@ -26,12 +28,18 @@ struct MainModule {
 
 impl MainModule {
     fn init() -> Self {
+        // RuntimeModule MUST be constructed first: async_manager::initialize()
+        // must run before any module that spawns async work (PetModule's skin
+        // download in set_pet_model). It is placed first in children() too, so
+        // it is torn down last (children free in reverse order).
+        let runtime = RuntimeModule::init();
         let logger = LoggerModule::init();
         let command = CommandModule::init();
         let relay = RelayModule::init();
         let custom_models = CustomModelsModule::init();
         let pet = PetModule::init();
         Self {
+            runtime,
             logger,
             command,
             relay,
@@ -44,6 +52,7 @@ impl MainModule {
 impl Module for MainModule {
     fn children(&mut self) -> Vec<&mut dyn Module> {
         vec![
+            &mut self.runtime,
             &mut self.logger,
             &mut self.command,
             &mut self.relay,

@@ -1,16 +1,19 @@
 mod entity;
+mod skin;
 
 use std::{
     cell::RefCell,
+    ffi::{CStr, c_char},
     rc::{Rc, Weak},
 };
 
 use classicube_helpers::{
     entities::{ENTITY_SELF_ID, Entity},
+    events::gfx::{ContextLostEventHandler, ContextRecreatedEventHandler},
     local_player_vtable_hook::{LocalPlayerVTableHook, LocalPlayerVTableHooks},
 };
 
-use self::entity::{PetEntity, SkinFields};
+use self::entity::PetEntity;
 use crate::plugin::module::Module;
 
 thread_local!(
@@ -33,6 +36,9 @@ pub struct PetModule {
         reason = "kept alive to preserve the Weak handles in PET and the render closure"
     )]
     pet: Rc<RefCell<PetEntity>>,
+    // RAII graphics context event handlers for pet skin texture lifecycle.
+    _ctx_lost: ContextLostEventHandler,
+    _ctx_recreated: ContextRecreatedEventHandler,
 }
 
 impl PetModule {
@@ -54,9 +60,12 @@ impl PetModule {
             })),
             ..Default::default()
         };
+        let (ctx_lost, ctx_recreated) = skin::install_context_handlers();
         Self {
             hook: Some(LocalPlayerVTableHook::install(hooks)),
             pet,
+            _ctx_lost: ctx_lost,
+            _ctx_recreated: ctx_recreated,
         }
     }
 }
@@ -67,50 +76,53 @@ impl Module for PetModule {
         // slot via CustomModel_FreeAll. Revert to the built-in default first so
         // the pet's entity.Model never dangles; built-ins are never freed, so
         // this is safe regardless of whether our reset runs before or after the
-        // engine's.
+        // engine's. Clear the owned skin texture too.
         reset_pet_to_default_model();
     }
 
     fn free(&mut self) {
         self.hook = None;
+        // Release the owned GPU texture and unsubscribe context handlers (done
+        // automatically when _ctx_lost/_ctx_recreated drop after this fn).
+        skin::clear();
     }
 }
 
-/// Revert the pet to its built-in default model, dropping any copied custom
-/// skin. Safe to call without a live world. Returns `false` (no-op) if the pet
-/// is gone (between Free and the next Init).
+/// Revert the pet to its built-in default model and drop the owned skin
+/// texture. Safe to call without a live world. Returns `false` (no-op) if the
+/// pet is gone (between Free and the next Init).
 pub fn reset_pet_to_default_model() -> bool {
     let Some(pet) = PET.with_borrow(Weak::upgrade) else {
         return false;
     };
     pet.borrow_mut().reset_to_default_model();
+    skin::clear();
     true
 }
 
-/// Apply `model_name` to the pet and copy the local player's resolved skin
-/// (TextureId / SkinType / NonHumanSkin) so the custom model textures
-/// correctly. Returns `false` if the pet or local player is not available.
+/// Apply `model_name` to the pet and kick off an async download of the local
+/// player's skin to build an owned GPU texture. Returns `false` if the pet or
+/// local player is not available.
 pub fn set_pet_model(model_name: &str) -> bool {
     let Some(pet) = PET.with_borrow(Weak::upgrade) else {
         return false;
     };
-    // Read skin state from the local player's entity while it's alive.
+    pet.borrow_mut().set_model(model_name);
+
+    // Read the player's skin name from the entity struct while it's alive.
     // SAFETY: ENTITY_SELF_ID always exists in-world; the borrow is transient.
-    let skin = unsafe {
+    let skin_name = unsafe {
         let Some(local_player) = Entity::from_id(ENTITY_SELF_ID) else {
             return false;
         };
-        let inner = local_player.get_inner();
-        SkinFields {
-            skin_type: inner.SkinType,
-            texture_id: inner.TextureId,
-            non_human_skin: inner.NonHumanSkin,
-            u_scale: inner.uScale,
-            v_scale: inner.vScale,
-        }
-        // inner reference dropped here; SkinFields copies all values
+        let raw = &local_player.get_inner().SkinRaw;
+        // SkinRaw is a NUL-terminated char[64]; treat bytes as a C string.
+        let ptr = raw.as_ptr() as *const c_char;
+        CStr::from_ptr(ptr).to_string_lossy().into_owned()
+        // local_player (and the raw borrow) dropped here
     };
-    pet.borrow_mut().set_model(model_name, skin);
+
+    skin::request_player_skin(skin_name);
     true
 }
 

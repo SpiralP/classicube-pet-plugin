@@ -4,28 +4,17 @@ mod tests;
 use std::mem;
 
 use classicube_sys::{
-    Entity, Entity_Init, Entity_SetModel, EntityVTABLE, GfxResourceID, LocationUpdate,
-    Model_Render, OwnedString, PACKEDCOL_WHITE, PackedCol, Vec3, cc_bool, cc_uint8,
+    Entity, Entity_Init, Entity_SetModel, EntityVTABLE, LocationUpdate, Model_Render, OwnedString,
+    PACKEDCOL_WHITE, PackedCol, Vec3, cc_bool,
 };
 
 pub(super) const PET_MODEL: &str = "chicken";
 pub(super) const PET_MODEL_SCALE: f32 = 0.5;
 
-/// Skin state copied from the local player's entity so the pet renders with
-/// the player's resolved texture rather than grey geometry.
-#[derive(Copy, Clone)]
-pub struct SkinFields {
-    pub skin_type: cc_uint8,
-    pub texture_id: GfxResourceID,
-    pub non_human_skin: cc_bool,
-    pub u_scale: f32,
-    pub v_scale: f32,
-}
-
 /// The spec passed to `Entity_SetModel`: model name plus a `|scale` suffix
 /// that ClassiCube parses into the entity's `ModelScale`.
-fn model_spec() -> String {
-    format!("{PET_MODEL}|{PET_MODEL_SCALE}")
+fn model_spec(name: &str) -> String {
+    format!("{name}|{PET_MODEL_SCALE}")
 }
 
 pub struct PetEntity {
@@ -33,10 +22,6 @@ pub struct PetEntity {
     // VTABLE must be heap-allocated: the entity holds a raw pointer to it that
     // must remain valid for the lifetime of the PetEntity.
     _vtable: Box<EntityVTABLE>,
-    // Skin state of a freshly-constructed pet (no custom skin), captured at
-    // build time so `reset_to_default_model` can restore it without hardcoding
-    // the zero value of GfxResourceID (backend-dependent: pointer or integer).
-    default_skin: SkinFields,
 }
 
 impl PetEntity {
@@ -58,26 +43,22 @@ impl PetEntity {
         // Give the pet its own model + scale, independent of the local player.
         // Position and rotation default to world origin / no rotation; future
         // movement code mutates entity.Position / entity.Yaw etc. directly.
-        let spec = OwnedString::new(model_spec());
+        let spec = OwnedString::new(model_spec(PET_MODEL));
         // SAFETY: entity is a valid initialized Entity; spec outlives the call.
         unsafe { Entity_SetModel(&mut *entity, spec.as_cc_string()) };
 
         entity.VTABLE = vtable.as_ref();
 
-        // Capture the freshly-built skin state (Entity_Init defaults: no custom
-        // skin, uScale/vScale = 1.0) so we can restore it on a model revert.
-        let default_skin = SkinFields {
-            skin_type: entity.SkinType,
-            texture_id: entity.TextureId,
-            non_human_skin: entity.NonHumanSkin,
-            u_scale: entity.uScale,
-            v_scale: entity.vScale,
-        };
+        // Always use our own texture for the pet regardless of model type.
+        // Model_ApplyTexture: `tex = (model->usesHumanSkin || e->NonHumanSkin) ? e->TextureId : 0`
+        // Non-human models (chicken, most custom models) have usesHumanSkin=false,
+        // so without NonHumanSkin=1 our TextureId is ignored and the model falls
+        // back to its built-in default texture.
+        entity.NonHumanSkin = 1;
 
         Self {
             entity,
             _vtable: vtable,
-            default_skin,
         }
     }
 
@@ -94,28 +75,23 @@ impl PetEntity {
         e.RotZ = rot_z;
     }
 
-    /// Swap the pet to a different model and copy skin state from the local
-    /// player so it textures correctly. Called from `pet::set_pet_model`.
-    pub fn set_model(&mut self, name: &str, skin: SkinFields) {
-        let spec = OwnedString::new(format!("{name}|{PET_MODEL_SCALE}"));
+    /// Swap the pet to a different model. Skin state (`TextureId`, `SkinType`,
+    /// `NonHumanSkin`) is managed by `pet::skin` and is not touched here --
+    /// `Entity_SetModel` does not modify those fields, so an already-applied
+    /// owned skin persists across a model swap.
+    pub fn set_model(&mut self, name: &str) {
+        let spec = OwnedString::new(model_spec(name));
         // SAFETY: entity is a valid initialized Entity; spec outlives the call.
         unsafe { Entity_SetModel(&mut *self.entity, spec.as_cc_string()) };
-        let e = self.entity.as_mut();
-        e.SkinType = skin.skin_type;
-        e.TextureId = skin.texture_id;
-        e.NonHumanSkin = skin.non_human_skin;
-        e.uScale = skin.u_scale;
-        e.vScale = skin.v_scale;
     }
 
-    /// Revert the pet to its built-in default model and drop any copied custom
-    /// skin. PET_MODEL is built-in and never freed by the engine, so after this
-    /// `entity.Model` can no longer dangle even when every custom-model slot is
-    /// freed (Game_Reset's CustomModel_FreeAll, or the server reusing the
-    /// slot). Unlike `pet::set_pet_model`, this reads no game state, so it is
-    /// safe to call mid-Game_Reset / packet-handling when no world exists.
+    /// Revert the pet to its built-in default model. PET_MODEL is built-in and
+    /// never freed by the engine, so after this `entity.Model` can no longer
+    /// dangle even when every custom-model slot is freed (Game_Reset's
+    /// CustomModel_FreeAll, or the server reusing the slot). Skin is cleared
+    /// separately by the caller via `skin::clear()`.
     pub fn reset_to_default_model(&mut self) {
-        self.set_model(PET_MODEL, self.default_skin);
+        self.set_model(PET_MODEL);
     }
 
     /// Called every frame from the render hook to draw the pet at its own
