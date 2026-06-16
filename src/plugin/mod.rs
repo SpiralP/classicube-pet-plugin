@@ -1,3 +1,4 @@
+pub mod command;
 pub mod logger;
 pub mod module;
 pub mod pet;
@@ -5,7 +6,10 @@ pub mod relay;
 
 use std::cell::RefCell;
 
-use crate::plugin::{logger::LoggerModule, module::Module, pet::PetModule, relay::RelayModule};
+use crate::plugin::{
+    command::CommandModule, logger::LoggerModule, module::Module, pet::PetModule,
+    relay::RelayModule,
+};
 
 thread_local!(
     static MAIN_MODULE: RefCell<Option<MainModule>> = const { RefCell::new(None) };
@@ -13,6 +17,7 @@ thread_local!(
 
 struct MainModule {
     logger: LoggerModule,
+    command: CommandModule,
     relay: RelayModule,
     pet: PetModule,
 }
@@ -20,24 +25,29 @@ struct MainModule {
 impl MainModule {
     fn init() -> Self {
         let logger = LoggerModule::init();
+        let command = CommandModule::init();
         let relay = RelayModule::init();
         let pet = PetModule::init();
-        Self { logger, relay, pet }
+        Self {
+            logger,
+            command,
+            relay,
+            pet,
+        }
     }
 }
 
 impl Module for MainModule {
     fn children(&mut self) -> Vec<&mut dyn Module> {
-        vec![&mut self.logger, &mut self.relay, &mut self.pet]
+        vec![
+            &mut self.logger,
+            &mut self.command,
+            &mut self.relay,
+            &mut self.pet,
+        ]
     }
 }
 
-#[expect(
-    dead_code,
-    reason = "standing reload-safety infra for future permanent callbacks (e.g. a registered chat \
-              command) that outlive Free; the pet render hook is now a RAII LocalPlayerVTableHook \
-              and no longer needs this gate"
-)]
 pub fn is_plugin_active() -> bool {
     MAIN_MODULE.with_borrow(|m| m.is_some())
 }
