@@ -10,7 +10,7 @@ use classicube_helpers::{
     local_player_vtable_hook::{LocalPlayerVTableHook, LocalPlayerVTableHooks},
 };
 
-use self::entity::PetEntity;
+use self::entity::{PetEntity, SkinFields};
 use crate::plugin::module::Module;
 
 thread_local!(
@@ -62,9 +62,56 @@ impl PetModule {
 }
 
 impl Module for PetModule {
+    fn reset(&mut self) {
+        // Game_Reset (disconnect / local map load) zeroes every custom-model
+        // slot via CustomModel_FreeAll. Revert to the built-in default first so
+        // the pet's entity.Model never dangles; built-ins are never freed, so
+        // this is safe regardless of whether our reset runs before or after the
+        // engine's.
+        reset_pet_to_default_model();
+    }
+
     fn free(&mut self) {
         self.hook = None;
     }
+}
+
+/// Revert the pet to its built-in default model, dropping any copied custom
+/// skin. Safe to call without a live world. Returns `false` (no-op) if the pet
+/// is gone (between Free and the next Init).
+pub fn reset_pet_to_default_model() -> bool {
+    let Some(pet) = PET.with_borrow(Weak::upgrade) else {
+        return false;
+    };
+    pet.borrow_mut().reset_to_default_model();
+    true
+}
+
+/// Apply `model_name` to the pet and copy the local player's resolved skin
+/// (TextureId / SkinType / NonHumanSkin) so the custom model textures
+/// correctly. Returns `false` if the pet or local player is not available.
+pub fn set_pet_model(model_name: &str) -> bool {
+    let Some(pet) = PET.with_borrow(Weak::upgrade) else {
+        return false;
+    };
+    // Read skin state from the local player's entity while it's alive.
+    // SAFETY: ENTITY_SELF_ID always exists in-world; the borrow is transient.
+    let skin = unsafe {
+        let Some(local_player) = Entity::from_id(ENTITY_SELF_ID) else {
+            return false;
+        };
+        let inner = local_player.get_inner();
+        SkinFields {
+            skin_type: inner.SkinType,
+            texture_id: inner.TextureId,
+            non_human_skin: inner.NonHumanSkin,
+            u_scale: inner.uScale,
+            v_scale: inner.vScale,
+        }
+        // inner reference dropped here; SkinFields copies all values
+    };
+    pet.borrow_mut().set_model(model_name, skin);
+    true
 }
 
 /// Teleport the pet to the local player's current position and view angles.

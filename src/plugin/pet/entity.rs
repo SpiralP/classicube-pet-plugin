@@ -4,12 +4,23 @@ mod tests;
 use std::mem;
 
 use classicube_sys::{
-    Entity, Entity_Init, Entity_SetModel, EntityVTABLE, LocationUpdate, Model_Render, OwnedString,
-    PACKEDCOL_WHITE, PackedCol, Vec3, cc_bool,
+    Entity, Entity_Init, Entity_SetModel, EntityVTABLE, GfxResourceID, LocationUpdate,
+    Model_Render, OwnedString, PACKEDCOL_WHITE, PackedCol, Vec3, cc_bool, cc_uint8,
 };
 
-const PET_MODEL: &str = "chicken";
-const PET_MODEL_SCALE: f32 = 0.5;
+pub(super) const PET_MODEL: &str = "chicken";
+pub(super) const PET_MODEL_SCALE: f32 = 0.5;
+
+/// Skin state copied from the local player's entity so the pet renders with
+/// the player's resolved texture rather than grey geometry.
+#[derive(Copy, Clone)]
+pub struct SkinFields {
+    pub skin_type: cc_uint8,
+    pub texture_id: GfxResourceID,
+    pub non_human_skin: cc_bool,
+    pub u_scale: f32,
+    pub v_scale: f32,
+}
 
 /// The spec passed to `Entity_SetModel`: model name plus a `|scale` suffix
 /// that ClassiCube parses into the entity's `ModelScale`.
@@ -22,6 +33,10 @@ pub struct PetEntity {
     // VTABLE must be heap-allocated: the entity holds a raw pointer to it that
     // must remain valid for the lifetime of the PetEntity.
     _vtable: Box<EntityVTABLE>,
+    // Skin state of a freshly-constructed pet (no custom skin), captured at
+    // build time so `reset_to_default_model` can restore it without hardcoding
+    // the zero value of GfxResourceID (backend-dependent: pointer or integer).
+    default_skin: SkinFields,
 }
 
 impl PetEntity {
@@ -49,9 +64,20 @@ impl PetEntity {
 
         entity.VTABLE = vtable.as_ref();
 
+        // Capture the freshly-built skin state (Entity_Init defaults: no custom
+        // skin, uScale/vScale = 1.0) so we can restore it on a model revert.
+        let default_skin = SkinFields {
+            skin_type: entity.SkinType,
+            texture_id: entity.TextureId,
+            non_human_skin: entity.NonHumanSkin,
+            u_scale: entity.uScale,
+            v_scale: entity.vScale,
+        };
+
         Self {
             entity,
             _vtable: vtable,
+            default_skin,
         }
     }
 
@@ -66,6 +92,30 @@ impl PetEntity {
         e.RotX = rot_x;
         e.RotY = rot_y;
         e.RotZ = rot_z;
+    }
+
+    /// Swap the pet to a different model and copy skin state from the local
+    /// player so it textures correctly. Called from `pet::set_pet_model`.
+    pub fn set_model(&mut self, name: &str, skin: SkinFields) {
+        let spec = OwnedString::new(format!("{name}|{PET_MODEL_SCALE}"));
+        // SAFETY: entity is a valid initialized Entity; spec outlives the call.
+        unsafe { Entity_SetModel(&mut *self.entity, spec.as_cc_string()) };
+        let e = self.entity.as_mut();
+        e.SkinType = skin.skin_type;
+        e.TextureId = skin.texture_id;
+        e.NonHumanSkin = skin.non_human_skin;
+        e.uScale = skin.u_scale;
+        e.vScale = skin.v_scale;
+    }
+
+    /// Revert the pet to its built-in default model and drop any copied custom
+    /// skin. PET_MODEL is built-in and never freed by the engine, so after this
+    /// `entity.Model` can no longer dangle even when every custom-model slot is
+    /// freed (Game_Reset's CustomModel_FreeAll, or the server reusing the
+    /// slot). Unlike `pet::set_pet_model`, this reads no game state, so it is
+    /// safe to call mid-Game_Reset / packet-handling when no world exists.
+    pub fn reset_to_default_model(&mut self) {
+        self.set_model(PET_MODEL, self.default_skin);
     }
 
     /// Called every frame from the render hook to draw the pet at its own

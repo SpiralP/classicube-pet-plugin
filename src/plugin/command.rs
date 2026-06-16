@@ -4,7 +4,7 @@ use classicube_helpers::chat;
 use classicube_sys::{OwnedChatCommand, cc_string};
 use tracing::debug;
 
-use crate::plugin::{is_plugin_active, module::Module, pet};
+use crate::plugin::{custom_models, is_plugin_active, module::Module, pet};
 
 thread_local!(
     // Pinned for the whole process. `OwnedChatCommand`'s Drop frees memory
@@ -36,8 +36,15 @@ unsafe extern "C" fn execute(args: *const cc_string, args_count: c_int) {
                 chat::print("&c[Pet] No pet to bring (are you in a world?)");
             }
         }
+        Some("copymodel") => match custom_models::copy_local_player_model_to_pet() {
+            Ok(name) => chat::print(format!("&e[Pet] Copied model '{name}' to your pet")),
+            Err(msg) => chat::print(msg),
+        },
         _ => {
             chat::print("&aUsage: &f/client pet here &e-- bring your pet to you");
+            chat::print(
+                "&aUsage: &f/client pet copymodel &e-- copy your current custom model to your pet",
+            );
         }
     }
 }
@@ -55,6 +62,8 @@ impl CommandModule {
                     vec![
                         "&aUsage: &f/client pet here",
                         "&eBring your pet to your position.",
+                        "&aUsage: &f/client pet copymodel",
+                        "&eCopy your current custom model to your pet.",
                     ],
                 );
                 command.register();

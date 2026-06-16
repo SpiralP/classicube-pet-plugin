@@ -1,4 +1,5 @@
 pub mod command;
+pub mod custom_models;
 pub mod logger;
 pub mod module;
 pub mod pet;
@@ -7,8 +8,8 @@ pub mod relay;
 use std::cell::RefCell;
 
 use crate::plugin::{
-    command::CommandModule, logger::LoggerModule, module::Module, pet::PetModule,
-    relay::RelayModule,
+    command::CommandModule, custom_models::CustomModelsModule, logger::LoggerModule,
+    module::Module, pet::PetModule, relay::RelayModule,
 };
 
 thread_local!(
@@ -19,6 +20,7 @@ struct MainModule {
     logger: LoggerModule,
     command: CommandModule,
     relay: RelayModule,
+    custom_models: CustomModelsModule,
     pet: PetModule,
 }
 
@@ -27,11 +29,13 @@ impl MainModule {
         let logger = LoggerModule::init();
         let command = CommandModule::init();
         let relay = RelayModule::init();
+        let custom_models = CustomModelsModule::init();
         let pet = PetModule::init();
         Self {
             logger,
             command,
             relay,
+            custom_models,
             pet,
         }
     }
@@ -43,6 +47,7 @@ impl Module for MainModule {
             &mut self.logger,
             &mut self.command,
             &mut self.relay,
+            &mut self.custom_models,
             &mut self.pet,
         ]
     }
