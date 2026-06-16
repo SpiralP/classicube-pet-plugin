@@ -10,7 +10,7 @@ use classicube_relay::{RelayListener, Stream, packet::MapScope};
 use classicube_sys::Server;
 use tracing::{debug, error, warn};
 
-use crate::plugin::{module::Module, pet};
+use crate::plugin::module::Module;
 
 const RELAY_CHANNEL: u8 = 211;
 
@@ -137,11 +137,8 @@ pub fn send_pet_state(model: &str, model_scale: (f32, f32, f32), offset: (f32, f
 }
 
 fn broadcast_pet_state() {
-    let offset = pet::OFFSET;
-    // TODO: wire to live pet model/scale once the pet carries a stable model name.
-    // The pet currently mirrors the local player's Model pointer each frame,
-    // so there is no stored model string to read here yet.
-    send_pet_state("humanoid", (1.0, 1.0, 1.0), (offset.x, offset.y, offset.z));
+    // TODO: read live position from the PetEntity once it can follow the player.
+    send_pet_state("chicken", (0.5, 0.5, 0.5), (0.0, 0.0, 0.0));
 }
 
 pub struct RelayModule {

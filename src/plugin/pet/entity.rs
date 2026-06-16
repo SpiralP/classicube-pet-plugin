@@ -4,11 +4,18 @@ mod tests;
 use std::mem;
 
 use classicube_sys::{
-    Entity, Entity_Init, EntityVTABLE, LocationUpdate, Model_Render, PACKEDCOL_WHITE, PackedCol,
-    Vec3, cc_bool,
+    Entity, Entity_Init, Entity_SetModel, EntityVTABLE, LocationUpdate, Model_Render, OwnedString,
+    PACKEDCOL_WHITE, PackedCol, Vec3, cc_bool,
 };
 
-use super::OFFSET;
+const PET_MODEL: &str = "chicken";
+const PET_MODEL_SCALE: f32 = 0.5;
+
+/// The spec passed to `Entity_SetModel`: model name plus a `|scale` suffix
+/// that ClassiCube parses into the entity's `ModelScale`.
+fn model_spec() -> String {
+    format!("{PET_MODEL}|{PET_MODEL_SCALE}")
+}
 
 pub struct PetEntity {
     pub entity: Box<Entity>,
@@ -33,6 +40,13 @@ impl PetEntity {
         // SAFETY: entity is a valid, zeroed Entity struct.
         unsafe { Entity_Init(&mut entity) };
 
+        // Give the pet its own model + scale, independent of the local player.
+        // Position and rotation default to world origin / no rotation; future
+        // movement code mutates entity.Position / entity.Yaw etc. directly.
+        let spec = OwnedString::new(model_spec());
+        // SAFETY: entity is a valid initialized Entity; spec outlives the call.
+        unsafe { Entity_SetModel(&mut *entity, spec.as_cc_string()) };
+
         entity.VTABLE = vtable.as_ref();
 
         Self {
@@ -41,35 +55,29 @@ impl PetEntity {
         }
     }
 
-    /// Called every frame from the render hook: sync position/model from the
-    /// local player then draw.
-    ///
-    /// # Safety
-    /// `local_player` must be a valid non-null pointer to the local player
-    /// Entity, which remains valid for the duration of this call.
-    pub unsafe fn update_and_render(&mut self, local_player: *mut Entity) {
-        let lp = unsafe { &*local_player };
-
-        // Mirror the player's model pointer directly so the pet tracks model
-        // changes (e.g. CPE ChangeModel) automatically.
-        self.entity.Model = lp.Model;
-        self.entity.ModelScale = lp.ModelScale;
-
-        self.entity.Position = offset_position(lp.Position, OFFSET);
-        self.entity.Yaw = lp.Yaw;
-        self.entity.RotY = lp.RotY;
-        self.entity.Pitch = lp.Pitch;
-
+    /// Move the pet to a world position + view angles. Pure field writes; the
+    /// next `update_and_render` draws it at the new transform.
+    pub fn set_transform(&mut self, position: Vec3, pitch: f32, yaw: f32, rot: [f32; 3]) {
         let e = self.entity.as_mut();
-        // SAFETY: entity.Model was just set from the local player's non-null
-        // model pointer, and entity is a valid Entity.
+        e.Position = position;
+        e.Pitch = pitch;
+        e.Yaw = yaw;
+        let [rot_x, rot_y, rot_z] = rot;
+        e.RotX = rot_x;
+        e.RotY = rot_y;
+        e.RotZ = rot_z;
+    }
+
+    /// Called every frame from the render hook to draw the pet at its own
+    /// position with its own model/scale. The pet owns all of its state;
+    /// nothing here reads the local player. Must run on the render thread,
+    /// which the `RenderModel` hook guarantees.
+    pub fn update_and_render(&mut self) {
+        let e = self.entity.as_mut();
+        // SAFETY: entity.Model is set at construction by Entity_SetModel and is
+        // never null; entity is a valid Entity.
         unsafe { Model_Render(e.Model, e) };
     }
-}
-
-/// Offset `base` by `off` component-wise (pure, testable without FFI).
-pub fn offset_position(base: Vec3, off: Vec3) -> Vec3 {
-    Vec3::new(base.x + off.x, base.y + off.y, base.z + off.z)
 }
 
 extern "C" fn noop_tick(_e: *mut Entity, _delta: f32) {}

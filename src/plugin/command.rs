@@ -4,7 +4,7 @@ use classicube_helpers::chat;
 use classicube_sys::{OwnedChatCommand, cc_string};
 use tracing::debug;
 
-use crate::plugin::{is_plugin_active, module::Module};
+use crate::plugin::{is_plugin_active, module::Module, pet};
 
 thread_local!(
     // Pinned for the whole process. `OwnedChatCommand`'s Drop frees memory
@@ -28,8 +28,18 @@ unsafe extern "C" fn execute(args: *const cc_string, args_count: c_int) {
         .collect();
     debug!(?args, "pet command");
 
-    // TODO: dispatch subcommands here as the plugin grows.
-    chat::print(format!("&e[Pet] {}", args.join(" ")));
+    match args.first().map(String::as_str) {
+        Some("here") => {
+            if pet::bring_pet_to_player() {
+                chat::print("&e[Pet] Coming!");
+            } else {
+                chat::print("&c[Pet] No pet to bring (are you in a world?)");
+            }
+        }
+        _ => {
+            chat::print("&aUsage: &f/client pet here &e-- bring your pet to you");
+        }
+    }
 }
 
 pub struct CommandModule;
@@ -42,7 +52,10 @@ impl CommandModule {
                     "Pet",
                     execute,
                     false, // not singleplayer-only
-                    vec!["&aUsage: &f/client pet", "&ePlaceholder pet command."],
+                    vec![
+                        "&aUsage: &f/client pet here",
+                        "&eBring your pet to your position.",
+                    ],
                 );
                 command.register();
                 *slot = Some(command);
