@@ -100,10 +100,10 @@ pub fn reset_pet_to_default_model() -> bool {
     true
 }
 
-/// Apply `model_name` to the pet and kick off an async download of the local
-/// player's skin to build an owned GPU texture. Returns `false` if the pet or
-/// local player is not available.
-pub fn set_pet_model(model_name: &str) -> bool {
+/// Apply `model_name` to the pet and kick off an async download of the skin
+/// from `skin_source_id` to build an owned GPU texture. Returns `false` if the
+/// pet or the source entity is not available.
+pub fn set_pet_model(model_name: &str, skin_source_id: u8) -> bool {
     let Some(pet) = PET.with_borrow(Weak::upgrade) else {
         return false;
     };
@@ -115,23 +115,24 @@ pub fn set_pet_model(model_name: &str) -> bool {
     // with no outstanding pet borrow -- skin::clear borrows the same PET cell.
     skin::clear();
 
-    // Mirror the player's skin fields onto the pet (the writes Entity_SetSkin
-    // performs: SkinRaw + NonHumanSkin) and capture the skin name for the async
-    // re-fetch. Mirroring NonHumanSkin makes the pet honour its own TextureId
-    // exactly when the player's model does (Model_ApplyTexture uses
-    // `model.usesHumanSkin || e.NonHumanSkin`); otherwise a non-human/custom
-    // model would ignore the pet's downloaded skin.
-    // SAFETY: ENTITY_SELF_ID always exists in-world; the borrow is transient.
+    // Mirror the source entity's skin fields onto the pet (the writes
+    // Entity_SetSkin performs: SkinRaw + NonHumanSkin) and capture the skin
+    // name for the async re-fetch. Mirroring NonHumanSkin makes the pet honour
+    // its own TextureId exactly when the source model does (Model_ApplyTexture
+    // uses `model.usesHumanSkin || e.NonHumanSkin`); otherwise a
+    // non-human/custom model would ignore the pet's downloaded skin.
+    // SAFETY: skin_source_id names a live entity in-world; the borrow is
+    // transient.
     let skin_name = unsafe {
-        let Some(local_player) = Entity::from_id(ENTITY_SELF_ID) else {
+        let Some(source) = Entity::from_id(skin_source_id) else {
             return false;
         };
-        let inner = local_player.get_inner();
+        let inner = source.get_inner();
         pet.borrow_mut().copy_skin_from(inner);
         // SkinRaw is a NUL-terminated char[64]; treat bytes as a C string.
         let ptr = inner.SkinRaw.as_ptr() as *const c_char;
         CStr::from_ptr(ptr).to_string_lossy().into_owned()
-        // local_player (and the inner borrow) dropped here
+        // source (and the inner borrow) dropped here
     };
 
     skin::request_player_skin(skin_name);

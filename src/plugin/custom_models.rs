@@ -8,10 +8,7 @@ use std::{
     rc::{Rc, Weak},
 };
 
-use classicube_helpers::{
-    entities::{ENTITY_SELF_ID, Entity},
-    protocol_hook::ProtocolHook,
-};
+use classicube_helpers::{entities::Entity, protocol_hook::ProtocolHook};
 use classicube_sys::{
     Model_Get, OPCODE__OPCODE_DEFINE_MODEL, OPCODE__OPCODE_DEFINE_MODEL_PART,
     OPCODE__OPCODE_UNDEFINE_MODEL, OwnedString, Protocol,
@@ -147,7 +144,7 @@ fn pick_free_slot(occupied: &[bool; 64]) -> Option<u8> {
 /// by reverting the pet off the soon-to-be-reused slot. Pure (no FFI) so it can
 /// be unit-tested; the revert side effect lives in `on_define`.
 fn handle_define(state: &mut State, data: &[u8]) -> bool {
-    // Skip the pet defines we replay ourselves (see copy_local_player_model_to_pet).
+    // Skip the pet defines we replay ourselves (see copy_entity_model_to_pet).
     // They target pet_slot, so without this guard they would self-trigger the
     // collision check below; we also must not recapture them.
     if state.injecting {
@@ -343,30 +340,32 @@ impl Module for CustomModelsModule {
 
 // -- Command entry point ---------------------------------------------------
 
-/// Copy the local player's current model onto the pet.
+/// Copy an entity's current model onto the pet.
 ///
-/// Reads the player's active model name. A captured custom model is cloned into
+/// `entity_id` is the ClassiCube entity slot (0-255; 255 = local player).
+///
+/// Reads the entity's active model name. A captured custom model is cloned into
 /// a free slot under a `pet_` name and injected; a name ClassiCube already knows
 /// (a built-in like "chicken", or any registered model) is applied to the pet
 /// directly with no slot allocation. Either way `pet::set_pet_model` then copies
-/// the player's resolved skin.
+/// the entity's resolved skin.
 ///
 /// Returns `Ok(model_name)` on success, `Err(chat_message)` on any failure.
-pub fn copy_local_player_model_to_pet() -> Result<String, String> {
+pub fn copy_entity_model_to_pet(entity_id: u8) -> Result<String, String> {
     let Some(state) = CUSTOM_MODELS_STATE.with_borrow(Weak::upgrade) else {
         return Err("[Pet] Custom models module not active".to_string());
     };
 
-    // Read the local player's active model name (Model.name, no |scale suffix).
+    // Read the entity's active model name (Model.name, no |scale suffix).
     let original_name = unsafe {
-        let Some(local_player) = Entity::from_id(ENTITY_SELF_ID) else {
-            return Err("[Pet] No active world".to_string());
+        let Some(entity) = Entity::from_id(entity_id) else {
+            return Err("[Pet] Entity not available (are you in a world?)".to_string());
         };
-        let Some(model) = local_player.get_model() else {
-            return Err("[Pet] Player has no model".to_string());
+        let Some(model) = entity.get_model() else {
+            return Err("[Pet] Entity has no model".to_string());
         };
         if model.name.is_null() {
-            return Err("[Pet] Player model has no name".to_string());
+            return Err("[Pet] Entity model has no name".to_string());
         }
         CStr::from_ptr(model.name).to_string_lossy().into_owned()
     };
@@ -390,7 +389,7 @@ pub fn copy_local_player_model_to_pet() -> Result<String, String> {
                 "[Pet] Model '{original_name}' not yet captured -- try /reload"
             ));
         }
-        if !pet::set_pet_model(&original_name) {
+        if !pet::set_pet_model(&original_name, entity_id) {
             return Err("[Pet] Pet not available (are you in a world?)".to_string());
         }
         // Release any custom slot the pet held before: drop our claim first so
@@ -484,8 +483,8 @@ pub fn copy_local_player_model_to_pet() -> Result<String, String> {
     // Replay done: subsequent defines on pet_slot are foreign collisions again.
     state.borrow_mut().injecting = false;
 
-    // Apply the model to the pet and copy the local player's resolved skin.
-    if !pet::set_pet_model(&pet_name) {
+    // Apply the model to the pet and copy the source entity's resolved skin.
+    if !pet::set_pet_model(&pet_name, entity_id) {
         return Err("[Pet] Pet not available (are you in a world?)".to_string());
     }
 

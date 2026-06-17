@@ -1,7 +1,14 @@
+#[cfg(test)]
+mod tests;
+
 use std::{cell::RefCell, os::raw::c_int, slice};
 
-use classicube_helpers::chat;
-use classicube_sys::{OwnedChatCommand, cc_string};
+use classicube_helpers::{
+    chat,
+    entities::{ENTITY_SELF_ID, Entity},
+    tab_list::remove_color,
+};
+use classicube_sys::{ENTITIES_MAX_COUNT, OwnedChatCommand, cc_string};
 use tracing::debug;
 
 use crate::plugin::{custom_models, is_plugin_active, module::Module, pet};
@@ -12,6 +19,40 @@ thread_local!(
     // unregister API -- register once, never clear this slot.
     static COMMAND: RefCell<Option<OwnedChatCommand>> = const { RefCell::new(None) };
 );
+
+/// True if `candidate` contains `query`, with color codes stripped and
+/// case-folded on both sides.
+fn name_matches(candidate: &str, query: &str) -> bool {
+    remove_color(candidate)
+        .to_lowercase()
+        .contains(&remove_color(query).to_lowercase())
+}
+
+/// Return the id of the first live entity on the current map whose display name
+/// matches `query` (case-insensitive substring, color codes stripped).
+///
+/// This function touches ClassiCube FFI (`Entities.List`, `Entity::from_id`).
+/// Keep it out of test-reachable code so `--gc-sections` drops the FFI
+/// references and the test binary links cleanly.
+fn find_entity_by_name(query: &str) -> Option<u8> {
+    for id in 0..ENTITIES_MAX_COUNT {
+        // ENTITIES_MAX_COUNT == 256; ids fit in u8 (0..=255).
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "ENTITIES_MAX_COUNT == 256; range is 0..255 which fits u8"
+        )]
+        let id = id as u8;
+        // SAFETY: Entity::from_id null-checks Entities.List[id]; the returned
+        // reference is valid for this loop iteration only.
+        let Some(entity) = (unsafe { Entity::from_id(id) }) else {
+            continue;
+        };
+        if name_matches(&entity.get_display_name(), query) {
+            return Some(id);
+        }
+    }
+    None
+}
 
 /// `/client pet ...` (or `/pet ...`). Bails when the plugin is inactive so a
 /// command invoked during the Free -> next-Init gap touches no torn-down state.
@@ -36,14 +77,36 @@ unsafe extern "C" fn execute(args: *const cc_string, args_count: c_int) {
                 chat::print("&c[Pet] No pet to bring (are you in a world?)");
             }
         }
-        Some("copymodel") => match custom_models::copy_local_player_model_to_pet() {
-            Ok(name) => chat::print(format!("&e[Pet] Copied model '{name}' to your pet")),
-            Err(msg) => chat::print(msg),
-        },
+        Some("copy") => {
+            // Join remaining args as the entity name query.
+            let query = args[1..].join(" ");
+            let query = query.trim();
+
+            let entity_id = if query.is_empty() {
+                // No name: copy the local player (self).
+                ENTITY_SELF_ID
+            } else {
+                match find_entity_by_name(query) {
+                    Some(id) => id,
+                    None => {
+                        chat::print(format!(
+                            "&c[Pet] No entity named '{query}' found on this map"
+                        ));
+                        return;
+                    }
+                }
+            };
+
+            match custom_models::copy_entity_model_to_pet(entity_id) {
+                Ok(name) => chat::print(format!("&e[Pet] Copied model '{name}' to your pet")),
+                Err(msg) => chat::print(msg),
+            }
+        }
         _ => {
             chat::print("&aUsage: &f/client pet here &e-- bring your pet to you");
             chat::print(
-                "&aUsage: &f/client pet copymodel &e-- copy your current custom model to your pet",
+                "&aUsage: &f/client pet copy [name] &e-- copy an entity's model to your pet (no \
+                 name = you)",
             );
         }
     }
@@ -62,8 +125,8 @@ impl CommandModule {
                     vec![
                         "&aUsage: &f/client pet here",
                         "&eBring your pet to your position.",
-                        "&aUsage: &f/client pet copymodel",
-                        "&eCopy your current custom model to your pet.",
+                        "&aUsage: &f/client pet copy [name]",
+                        "&eCopy an entity's model to your pet. No name copies your own model.",
                     ],
                 );
                 command.register();
