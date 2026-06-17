@@ -13,8 +13,8 @@ use classicube_helpers::{
     protocol_hook::ProtocolHook,
 };
 use classicube_sys::{
-    OPCODE__OPCODE_DEFINE_MODEL, OPCODE__OPCODE_DEFINE_MODEL_PART, OPCODE__OPCODE_UNDEFINE_MODEL,
-    Protocol,
+    Model_Get, OPCODE__OPCODE_DEFINE_MODEL, OPCODE__OPCODE_DEFINE_MODEL_PART,
+    OPCODE__OPCODE_UNDEFINE_MODEL, OwnedString, Protocol,
 };
 use tracing::{debug, info};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
@@ -250,6 +250,26 @@ fn on_undef(state: &mut State, data: &[u8]) {
     }
 }
 
+/// Return `true` if ClassiCube already knows a model by this name -- a built-in
+/// (e.g. "chicken", "humanoid") or any model already registered in models_head.
+/// `Model_Get` returns null for an unknown name. FFI, so not test-reachable.
+fn model_exists(name: &str) -> bool {
+    let owned = OwnedString::new(name);
+    // SAFETY: Model_Get only reads the cc_string we pass; owned outlives the call.
+    !unsafe { Model_Get(owned.as_cc_string()) }.is_null()
+}
+
+/// Replay an UndefineModel packet for `slot` through ClassiCube's handler so it
+/// frees the model's vertex data. FFI, so not test-reachable.
+fn undefine_slot(slot: u8) {
+    let handler = unsafe { Protocol.Handlers[OPCODE__OPCODE_UNDEFINE_MODEL as usize] };
+    if let Some(f) = handler {
+        let mut payload = vec![slot];
+        // SAFETY: the handler reads a 1-byte UndefineModel payload (the slot id).
+        unsafe { f(payload.as_mut_ptr()) };
+    }
+}
+
 // -- Module ----------------------------------------------------------------
 
 impl CustomModelsModule {
@@ -323,11 +343,13 @@ impl Module for CustomModelsModule {
 
 // -- Command entry point ---------------------------------------------------
 
-/// Copy the local player's current custom model onto the pet.
+/// Copy the local player's current model onto the pet.
 ///
-/// Reads the player's active model name, looks it up in the capture map,
-/// injects a renamed clone into a free slot, then calls
-/// `pet::set_pet_model` (which also copies the player's resolved skin).
+/// Reads the player's active model name. A captured custom model is cloned into
+/// a free slot under a `pet_` name and injected; a name ClassiCube already knows
+/// (a built-in like "chicken", or any registered model) is applied to the pet
+/// directly with no slot allocation. Either way `pet::set_pet_model` then copies
+/// the player's resolved skin.
 ///
 /// Returns `Ok(model_name)` on success, `Err(chat_message)` on any failure.
 pub fn copy_local_player_model_to_pet() -> Result<String, String> {
@@ -349,9 +371,54 @@ pub fn copy_local_player_model_to_pet() -> Result<String, String> {
         CStr::from_ptr(model.name).to_string_lossy().into_owned()
     };
 
+    // Snapshot the captured payloads (if any) under a short borrow, then drop it.
+    let captured = {
+        let s = state.borrow();
+        s.captured
+            .get(&original_name)
+            .map(|c| (c.define.clone(), c.parts.clone()))
+    };
+
+    let Some((define_data, parts_data)) = captured else {
+        // Not a captured custom model. If ClassiCube already knows this name --
+        // a built-in (e.g. "chicken", "humanoid") or any already-registered
+        // model -- point the pet straight at it. Built-ins live in models_head
+        // for the whole process and are never freed, so there's no slot to
+        // allocate or guard against server reuse.
+        if !model_exists(&original_name) {
+            return Err(format!(
+                "[Pet] Model '{original_name}' not yet captured -- try /reload"
+            ));
+        }
+        if !pet::set_pet_model(&original_name) {
+            return Err("[Pet] Pet not available (are you in a world?)".to_string());
+        }
+        // Release any custom slot the pet held before: drop our claim first so
+        // the undefine isn't seen as a collision, then free its vertex data.
+        // Otherwise the stale pet_slot leaks and the collision guard could later
+        // revert this built-in pet off a slot it no longer uses.
+        let old_slot = {
+            let mut s = state.borrow_mut();
+            let old = s.pet_slot.take();
+            if let Some(old) = old {
+                s.occupied[old as usize] = false;
+            }
+            old
+        };
+        if let Some(old_id) = old_slot {
+            undefine_slot(old_id);
+        }
+        info!("applied built-in model '{}'", original_name);
+        return Ok(original_name);
+    };
+
+    // -- captured custom-model path --
+
     // TODO don't like this -- can we detect CPE support more robustly?
     // Custom models v2 sets Sizes[DEFINE_MODEL_PART] to 167 during extension
-    // negotiation. Anything else means the server doesn't support them.
+    // negotiation. Anything else means the server doesn't support them. (A
+    // captured entry implies the server sent these packets, but keep the guard
+    // so injection never runs against an unprepared handler.)
     let part_size: u16 = unsafe { Protocol.Sizes[OPCODE__OPCODE_DEFINE_MODEL_PART as usize] };
     if part_size != 167 {
         return Err("[Pet] Server does not support custom models v2".to_string());
@@ -362,17 +429,6 @@ pub fn copy_local_player_model_to_pet() -> Result<String, String> {
     // capture hooks' own RefCell borrows.
     let (old_slot, new_slot, pet_name, patched_define, patched_parts) = {
         let mut s = state.borrow_mut();
-
-        // Clone the raw payloads first so the immutable borrow on s.captured
-        // is released before we mutate s.occupied / s.pet_slot below.
-        let (define_data, parts_data) = match s.captured.get(&original_name) {
-            Some(c) => (c.define.clone(), c.parts.clone()),
-            None => {
-                return Err(format!(
-                    "[Pet] Model '{original_name}' not yet captured -- try /reload"
-                ));
-            }
-        };
 
         // Pet model name has a "pet_" prefix so it cannot clash in models_head
         // with the server's same-named model (our replay is skipped via the
@@ -405,11 +461,7 @@ pub fn copy_local_player_model_to_pet() -> Result<String, String> {
 
     // Undefine the previous pet model slot so ClassiCube frees its vertex data.
     if let Some(old_id) = old_slot {
-        let handler = unsafe { Protocol.Handlers[OPCODE__OPCODE_UNDEFINE_MODEL as usize] };
-        if let Some(f) = handler {
-            let mut payload = vec![old_id];
-            unsafe { f(payload.as_mut_ptr()) };
-        }
+        undefine_slot(old_id);
     }
 
     // Inject DefineModel (our trampoline forwards to ClassiCube, which allocates
