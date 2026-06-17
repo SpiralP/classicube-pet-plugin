@@ -109,17 +109,29 @@ pub fn set_pet_model(model_name: &str) -> bool {
     };
     pet.borrow_mut().set_model(model_name);
 
-    // Read the player's skin name from the entity struct while it's alive.
+    // DeleteSkin-equivalent: drop the old owned texture + reset the pet's skin
+    // fields so the new model shows its default texture until the new skin
+    // downloads (mirrors Entity_SetSkin's leading DeleteSkin call). Must run
+    // with no outstanding pet borrow -- skin::clear borrows the same PET cell.
+    skin::clear();
+
+    // Mirror the player's skin fields onto the pet (the writes Entity_SetSkin
+    // performs: SkinRaw + NonHumanSkin) and capture the skin name for the async
+    // re-fetch. Mirroring NonHumanSkin makes the pet honour its own TextureId
+    // exactly when the player's model does (Model_ApplyTexture uses
+    // `model.usesHumanSkin || e.NonHumanSkin`); otherwise a non-human/custom
+    // model would ignore the pet's downloaded skin.
     // SAFETY: ENTITY_SELF_ID always exists in-world; the borrow is transient.
     let skin_name = unsafe {
         let Some(local_player) = Entity::from_id(ENTITY_SELF_ID) else {
             return false;
         };
-        let raw = &local_player.get_inner().SkinRaw;
+        let inner = local_player.get_inner();
+        pet.borrow_mut().copy_skin_from(inner);
         // SkinRaw is a NUL-terminated char[64]; treat bytes as a C string.
-        let ptr = raw.as_ptr() as *const c_char;
+        let ptr = inner.SkinRaw.as_ptr() as *const c_char;
         CStr::from_ptr(ptr).to_string_lossy().into_owned()
-        // local_player (and the raw borrow) dropped here
+        // local_player (and the inner borrow) dropped here
     };
 
     skin::request_player_skin(skin_name);

@@ -49,13 +49,6 @@ impl PetEntity {
 
         entity.VTABLE = vtable.as_ref();
 
-        // Always use our own texture for the pet regardless of model type.
-        // Model_ApplyTexture: `tex = (model->usesHumanSkin || e->NonHumanSkin) ? e->TextureId : 0`
-        // Non-human models (chicken, most custom models) have usesHumanSkin=false,
-        // so without NonHumanSkin=1 our TextureId is ignored and the model falls
-        // back to its built-in default texture.
-        entity.NonHumanSkin = 1;
-
         Self {
             entity,
             _vtable: vtable,
@@ -75,14 +68,30 @@ impl PetEntity {
         e.RotZ = rot_z;
     }
 
-    /// Swap the pet to a different model. Skin state (`TextureId`, `SkinType`,
-    /// `NonHumanSkin`) is managed by `pet::skin` and is not touched here --
+    /// Swap the pet to a different model. Texture state (`TextureId`,
+    /// `SkinType`) is managed by `pet::skin` and the skin fields (`SkinRaw`,
+    /// `NonHumanSkin`) by `copy_skin_from`; none are touched here --
     /// `Entity_SetModel` does not modify those fields, so an already-applied
     /// owned skin persists across a model swap.
     pub fn set_model(&mut self, name: &str) {
         let spec = OwnedString::new(model_spec(name));
         // SAFETY: entity is a valid initialized Entity; spec outlives the call.
         unsafe { Entity_SetModel(&mut *self.entity, spec.as_cc_string()) };
+    }
+
+    /// Mirror the skin fields ClassiCube's `Entity_SetSkin` writes -- `SkinRaw`
+    /// and `NonHumanSkin` -- from the source entity (the player whose model the
+    /// pet is copying). `Model_ApplyTexture` honours `e.TextureId` only when
+    /// `model.usesHumanSkin || e.NonHumanSkin`, so mirroring `NonHumanSkin`
+    /// makes the pet honour its own texture exactly when the source does.
+    /// `SkinRaw` is inert on the standalone pet (it's not in `Entities.List`, so
+    /// the engine's skin-fetch state machine never runs off it) but is copied to
+    /// keep the pet a faithful clone. ClassiCube does the same `NonHumanSkin`
+    /// copy when deriving the held-block entity (`HeldBlockRenderer.c`:
+    /// `held_entity.NonHumanSkin = p->NonHumanSkin`).
+    pub fn copy_skin_from(&mut self, src: &Entity) {
+        self.entity.SkinRaw = src.SkinRaw;
+        self.entity.NonHumanSkin = src.NonHumanSkin;
     }
 
     /// Revert the pet to its built-in default model. PET_MODEL is built-in and
