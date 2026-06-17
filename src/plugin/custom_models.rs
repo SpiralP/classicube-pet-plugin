@@ -348,7 +348,8 @@ impl Module for CustomModelsModule {
 /// a free slot under a `pet_` name and injected; a name ClassiCube already knows
 /// (a built-in like "chicken", or any registered model) is applied to the pet
 /// directly with no slot allocation. Either way `pet::set_pet_model` then copies
-/// the entity's resolved skin.
+/// the entity's resolved skin and `ModelBlock` (so block models like `/model stone`
+/// render correctly on the pet).
 ///
 /// Returns `Ok(model_name)` on success, `Err(chat_message)` on any failure.
 pub fn copy_entity_model_to_pet(entity_id: u8) -> Result<String, String> {
@@ -483,7 +484,8 @@ pub fn copy_entity_model_to_pet(entity_id: u8) -> Result<String, String> {
     // Replay done: subsequent defines on pet_slot are foreign collisions again.
     state.borrow_mut().injecting = false;
 
-    // Apply the model to the pet and copy the source entity's resolved skin.
+    // Apply the model to the pet and copy the source entity's resolved skin
+    // and ModelBlock (so block models carry their block id).
     if !pet::set_pet_model(&pet_name, entity_id) {
         return Err("[Pet] Pet not available (are you in a world?)".to_string());
     }

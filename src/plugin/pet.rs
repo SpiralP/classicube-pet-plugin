@@ -115,12 +115,23 @@ pub fn set_pet_model(model_name: &str, skin_source_id: u8) -> bool {
     // with no outstanding pet borrow -- skin::clear borrows the same PET cell.
     skin::clear();
 
-    // Mirror the source entity's skin fields onto the pet (the writes
-    // Entity_SetSkin performs: SkinRaw + NonHumanSkin) and capture the skin
-    // name for the async re-fetch. Mirroring NonHumanSkin makes the pet honour
-    // its own TextureId exactly when the source model does (Model_ApplyTexture
-    // uses `model.usesHumanSkin || e.NonHumanSkin`); otherwise a
-    // non-human/custom model would ignore the pet's downloaded skin.
+    // Mirror the source entity's skin fields (SkinRaw + NonHumanSkin) and
+    // ModelBlock onto the pet, then capture the skin name for the async
+    // re-fetch.
+    //
+    // NonHumanSkin: makes the pet honour its own TextureId exactly when the
+    // source model does (Model_ApplyTexture uses
+    // `model.usesHumanSkin || e.NonHumanSkin`); otherwise a non-human/custom
+    // model would ignore the pet's downloaded skin.
+    //
+    // ModelBlock: for a block model (`/model stone`) the block id lives only in
+    // this field -- the model name is always the generic "block". Without the
+    // mirror the pet's ModelBlock stays BLOCK_AIR (from Entity_SetModel's reset)
+    // and BlockModel_Draw returns immediately, rendering nothing. For non-block
+    // models ModelBlock is BLOCK_AIR on the source too, so the copy is a no-op.
+    // Must run after set_model (which resets ModelBlock to BLOCK_AIR first).
+    // Same pattern as HeldBlockRenderer.c: `held_entity.ModelBlock = held_block`.
+    //
     // SAFETY: skin_source_id names a live entity in-world; the borrow is
     // transient.
     let skin_name = unsafe {
@@ -129,6 +140,7 @@ pub fn set_pet_model(model_name: &str, skin_source_id: u8) -> bool {
         };
         let inner = source.get_inner();
         pet.borrow_mut().copy_skin_from(inner);
+        pet.borrow_mut().copy_model_block_from(inner);
         // SkinRaw is a NUL-terminated char[64]; treat bytes as a C string.
         let ptr = inner.SkinRaw.as_ptr() as *const c_char;
         CStr::from_ptr(ptr).to_string_lossy().into_owned()

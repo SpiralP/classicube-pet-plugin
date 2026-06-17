@@ -1,11 +1,11 @@
 #[cfg(test)]
 mod tests;
 
-use std::mem;
+use std::{mem, os::raw::c_int};
 
 use classicube_sys::{
-    Entity, Entity_Init, Entity_SetModel, EntityVTABLE, LocationUpdate, Model_Render, OwnedString,
-    PACKEDCOL_WHITE, PackedCol, Vec3, cc_bool,
+    Entity, Entity_Init, Entity_SetModel, EntityVTABLE, Lighting, LocationUpdate, Model_Render,
+    OwnedString, PACKEDCOL_WHITE, PackedCol, Vec3, cc_bool,
 };
 
 pub(super) const PET_MODEL: &str = "chicken";
@@ -94,6 +94,19 @@ impl PetEntity {
         self.entity.NonHumanSkin = src.NonHumanSkin;
     }
 
+    /// Mirror the source entity's `ModelBlock` -- the block id the shared
+    /// `"block"` model renders. For a block model (`/model stone`) the id lives
+    /// only in `ModelBlock`, never in the model name; without this mirror the
+    /// pet's block model renders `BLOCK_AIR` (nothing). For non-block models the
+    /// source's `ModelBlock` is `BLOCK_AIR` and this is a no-op.
+    ///
+    /// Must be called *after* `set_model`, because `Entity_SetModel` resets
+    /// `ModelBlock` to `BLOCK_AIR` unconditionally. Mirrors `HeldBlockRenderer.c`:
+    /// `held_entity.ModelBlock = held_block`.
+    pub fn copy_model_block_from(&mut self, src: &Entity) {
+        self.entity.ModelBlock = src.ModelBlock;
+    }
+
     /// Revert the pet to its built-in default model. PET_MODEL is built-in and
     /// never freed by the engine, so after this `entity.Model` can no longer
     /// dangle even when every custom-model slot is freed (Game_Reset's
@@ -121,8 +134,35 @@ extern "C" fn noop_despawn(_e: *mut Entity) {}
 
 extern "C" fn noop_set_location(_e: *mut Entity, _update: *mut LocationUpdate) {}
 
-extern "C" fn get_col(_e: *mut Entity) -> PackedCol {
-    PACKEDCOL_WHITE
+/// Mirror ClassiCube's `Entity_GetColor` (`Entity.c`): sample the world
+/// lighting engine at the pet's eye position so it darkens in shadow and
+/// brightens in light, exactly like a real player/bot. Returning
+/// `PACKEDCOL_WHITE` unconditionally made the pet fullbright.
+///
+/// `Entity_GetEyePosition`/`IVec3_Floor` aren't `CC_API`, so the eye position
+/// is computed inline: `Position.y + model.GetEyeY(e) * ModelScale.y`, floored
+/// (matches `Entity_GetEyeHeight`). `Lighting.Color` is a `CC_VAR` global
+/// installed by the Lighting game component before any world renders; fall back
+/// to white if it is somehow unset (e.g. outside a world).
+///
+/// SAFETY: `e` is the live pet entity ClassiCube passes into `GetCol` on the
+/// render thread; `Model` is non-null (set at construction by
+/// `Entity_SetModel`).
+extern "C" fn get_col(e: *mut Entity) -> PackedCol {
+    unsafe {
+        let ent = &*e;
+        let eye_y = match (*ent.Model).GetEyeY {
+            Some(get_eye_y) => get_eye_y(e) * ent.ModelScale.y,
+            None => 0.0,
+        };
+        let x = ent.Position.x.floor() as c_int;
+        let y = (ent.Position.y + eye_y).floor() as c_int;
+        let z = ent.Position.z.floor() as c_int;
+        match Lighting.Color {
+            Some(color) => color(x, y, z),
+            None => PACKEDCOL_WHITE,
+        }
+    }
 }
 
 extern "C" fn noop_render_model(_e: *mut Entity, _delta: f32, _t: f32) {}
