@@ -9,7 +9,7 @@ use classicube_helpers::{
     tab_list::remove_color,
 };
 use classicube_sys::{ENTITIES_MAX_COUNT, OwnedChatCommand, cc_string};
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::plugin::{custom_models, is_plugin_active, module::Module, pet};
 
@@ -98,8 +98,21 @@ unsafe extern "C" fn execute(args: *const cc_string, args_count: c_int) {
             };
 
             match custom_models::copy_entity_model_to_pet(entity_id) {
-                Ok(name) => chat::print(format!("&e[Pet] Copied model '{name}' to your pet")),
-                Err(msg) => chat::print(msg),
+                Ok(o) => {
+                    debug!(?o, "copied entity model to pet");
+                    let desc = match &o.block_name {
+                        Some(b) => format!("block '{b}'"),
+                        None => format!("model '{}'", o.model_name),
+                    };
+                    chat::print(format!(
+                        "&e[Pet] Copied {desc} from '{}' to your pet",
+                        o.entity_name
+                    ));
+                }
+                Err(msg) => {
+                    warn!("{msg}");
+                    chat::print(msg);
+                }
             }
         }
         Some("go") => {

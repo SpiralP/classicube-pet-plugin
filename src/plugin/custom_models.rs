@@ -8,12 +8,13 @@ use std::{
     rc::{Rc, Weak},
 };
 
-use classicube_helpers::{entities::Entity, protocol_hook::ProtocolHook};
+use classicube_helpers::{entities::Entity, protocol_hook::ProtocolHook, tab_list::remove_color};
 use classicube_sys::{
-    Model_Get, OPCODE__OPCODE_DEFINE_MODEL, OPCODE__OPCODE_DEFINE_MODEL_PART,
-    OPCODE__OPCODE_UNDEFINE_MODEL, OwnedString, Protocol,
+    Block_UNSAFE_GetName, Blocks, DrawType, DrawType_DRAW_GAS, Model_Get,
+    OPCODE__OPCODE_DEFINE_MODEL, OPCODE__OPCODE_DEFINE_MODEL_PART, OPCODE__OPCODE_UNDEFINE_MODEL,
+    OwnedString, Protocol,
 };
-use tracing::{debug, info};
+use tracing::debug;
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 use crate::plugin::{module::Module, pet};
@@ -340,6 +341,19 @@ impl Module for CustomModelsModule {
 
 // -- Command entry point ---------------------------------------------------
 
+/// The resolved details returned by a successful [`copy_entity_model_to_pet`] call.
+#[derive(Debug)]
+pub struct CopyOutcome {
+    /// Display name of the entity whose model was copied, color codes stripped.
+    pub entity_name: String,
+    /// Resolved model name as ClassiCube knows it (e.g. `"sit"`, `"chicken"`,
+    /// `"block"`, or the custom-model original name).
+    pub model_name: String,
+    /// When the model is the block model, the block's display name (e.g.
+    /// `"Stone"`, `"Air"`). `None` for non-block models.
+    pub block_name: Option<String>,
+}
+
 /// Copy an entity's current model onto the pet.
 ///
 /// `entity_id` is the ClassiCube entity slot (0-255; 255 = local player).
@@ -351,14 +365,16 @@ impl Module for CustomModelsModule {
 /// the entity's resolved skin and `ModelBlock` (so block models like `/model stone`
 /// render correctly on the pet).
 ///
-/// Returns `Ok(model_name)` on success, `Err(chat_message)` on any failure.
-pub fn copy_entity_model_to_pet(entity_id: u8) -> Result<String, String> {
+/// Returns `Ok(CopyOutcome)` on success, `Err(chat_message)` on any failure.
+pub fn copy_entity_model_to_pet(entity_id: u8) -> Result<CopyOutcome, String> {
     let Some(state) = CUSTOM_MODELS_STATE.with_borrow(Weak::upgrade) else {
         return Err("[Pet] Custom models module not active".to_string());
     };
 
-    // Read the entity's active model name (Model.name, no |scale suffix).
-    let original_name = unsafe {
+    // Read the entity's active model name (Model.name, no |scale suffix),
+    // display name, and -- for block models -- the block display name and
+    // draw type (to detect render-nothing gas/air blocks early).
+    let (original_name, entity_name, block_name, is_gas_block) = unsafe {
         let Some(entity) = Entity::from_id(entity_id) else {
             return Err("[Pet] Entity not available (are you in a world?)".to_string());
         };
@@ -368,8 +384,27 @@ pub fn copy_entity_model_to_pet(entity_id: u8) -> Result<String, String> {
         if model.name.is_null() {
             return Err("[Pet] Entity model has no name".to_string());
         }
-        CStr::from_ptr(model.name).to_string_lossy().into_owned()
+        let original_name = CStr::from_ptr(model.name).to_string_lossy().into_owned();
+        let entity_name = remove_color(entity.get_display_name());
+        let (block_name, is_gas_block) = if original_name == "block" {
+            let mb = entity.get_inner().ModelBlock;
+            let bname = Block_UNSAFE_GetName(mb).to_string();
+            let is_gas = Blocks.Draw[mb as usize] as DrawType == DrawType_DRAW_GAS;
+            (Some(bname), is_gas)
+        } else {
+            (None, false)
+        };
+        (original_name, entity_name, block_name, is_gas_block)
     };
+
+    // Refuse to copy a model that renders nothing. Mirrors BlockModel_Draw's
+    // own early-out: `if (Blocks.Draw[bModel_block] == DRAW_GAS) return;`
+    if is_gas_block {
+        return Err(format!(
+            "&c[Pet] '{entity_name}' has an invisible block model ({}) -- nothing to copy",
+            block_name.as_deref().unwrap_or("air")
+        ));
+    }
 
     // Snapshot the captured payloads (if any) under a short borrow, then drop it.
     let captured = {
@@ -408,8 +443,13 @@ pub fn copy_entity_model_to_pet(entity_id: u8) -> Result<String, String> {
         if let Some(old_id) = old_slot {
             undefine_slot(old_id);
         }
-        info!("applied built-in model '{}'", original_name);
-        return Ok(original_name);
+        let outcome = CopyOutcome {
+            entity_name,
+            model_name: original_name,
+            block_name,
+        };
+        debug!(?outcome, "applied built-in model");
+        return Ok(outcome);
     };
 
     // -- captured custom-model path --
@@ -490,9 +530,11 @@ pub fn copy_entity_model_to_pet(entity_id: u8) -> Result<String, String> {
         return Err("[Pet] Pet not available (are you in a world?)".to_string());
     }
 
-    info!(
-        "applied custom model '{}' as '{}' in slot {}",
-        original_name, pet_name, new_slot
-    );
-    Ok(original_name)
+    let outcome = CopyOutcome {
+        entity_name,
+        model_name: original_name,
+        block_name,
+    };
+    debug!(?outcome, pet_name, slot = new_slot, "applied custom model");
+    Ok(outcome)
 }
