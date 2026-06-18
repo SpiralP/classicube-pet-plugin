@@ -102,11 +102,22 @@ unsafe extern "C" fn execute(args: *const cc_string, args_count: c_int) {
                 Err(msg) => chat::print(msg),
             }
         }
+        Some("go") => {
+            if pet::walk_pet_to_player() {
+                chat::print("&e[Pet] On my way!");
+            } else {
+                chat::print("&c[Pet] No pet to move (are you in a world?)");
+            }
+        }
         _ => {
             chat::print("&aUsage: &f/client pet here &e-- bring your pet to you");
             chat::print(
                 "&aUsage: &f/client pet copy [name] &e-- copy an entity's model to your pet (no \
                  name = you)",
+            );
+            chat::print(
+                "&aUsage: &f/client pet go &e-- walk your pet to you (teleports if no path or too \
+                 far)",
             );
         }
     }
@@ -127,6 +138,8 @@ impl CommandModule {
                         "&eBring your pet to your position.",
                         "&aUsage: &f/client pet copy [name]",
                         "&eCopy an entity's model to your pet. No name copies your own model.",
+                        "&aUsage: &f/client pet go",
+                        "&eWalk your pet to your position. Teleports if no path or too far away.",
                     ],
                 );
                 command.register();

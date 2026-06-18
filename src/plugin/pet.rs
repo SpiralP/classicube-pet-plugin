@@ -1,8 +1,10 @@
 mod entity;
+mod pathfind;
 mod skin;
 
 use std::{
     cell::RefCell,
+    collections::VecDeque,
     ffi::{CStr, c_char},
     rc::{Rc, Weak},
 };
@@ -12,6 +14,8 @@ use classicube_helpers::{
     events::gfx::{ContextLostEventHandler, ContextRecreatedEventHandler},
     local_player_vtable_hook::{LocalPlayerVTableHook, LocalPlayerVTableHooks},
 };
+use classicube_sys::Vec3;
+use pathfind::Cell;
 
 use self::entity::PetEntity;
 use crate::plugin::module::Module;
@@ -55,7 +59,7 @@ impl PetModule {
                 // non-null entity the engine passed into this dispatch.
                 unsafe { original(local_player, delta, t) };
                 if let Some(pet) = weak.upgrade() {
-                    pet.borrow_mut().update_and_render();
+                    pet.borrow_mut().update_and_render(delta);
                 }
             })),
             ..Default::default()
@@ -78,6 +82,11 @@ impl Module for PetModule {
         // this is safe regardless of whether our reset runs before or after the
         // engine's. Clear the owned skin texture too.
         reset_pet_to_default_model();
+        // Discard any in-progress walk path; the old coordinates belong to the
+        // previous map and would move the pet to the wrong place if kept.
+        if let Some(pet) = PET.with_borrow(Weak::upgrade) {
+            pet.borrow_mut().stop_walk();
+        }
     }
 
     fn free(&mut self) {
@@ -168,4 +177,81 @@ pub fn bring_pet_to_player() -> bool {
     let rot = local_player.get_rot();
     pet.borrow_mut().set_transform(position, pitch, yaw, rot);
     true
+}
+
+/// Make the pet walk to the local player's current position via A* pathfinding.
+/// Snapshots the player's position at call time (one-shot walk). Falls back to
+/// an instant teleport (`bring_pet_to_player`) when:
+/// - the world is not loaded,
+/// - the player is more than `MAX_PATH_DISTANCE` cells away (Manhattan),
+/// - no walkable path exists.
+///
+/// Returns `false` if the pet or local player is not available.
+pub fn walk_pet_to_player() -> bool {
+    let Some(pet) = PET.with_borrow(Weak::upgrade) else {
+        return false;
+    };
+    // SAFETY: ENTITY_SELF_ID always exists in-world; the borrow is transient.
+    let Some(local_player) = (unsafe { Entity::from_id(ENTITY_SELF_ID) }) else {
+        return false;
+    };
+    let player_pos = local_player.get_position();
+
+    if !pathfind::world_is_loaded() {
+        return bring_pet_to_player();
+    }
+
+    let pet_pos = pet.borrow().position();
+
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "ClassiCube world coordinates fit in i32"
+    )]
+    let pet_cell = Cell {
+        x: pet_pos.x.floor() as i32,
+        y: pet_pos.y.floor() as i32,
+        z: pet_pos.z.floor() as i32,
+    };
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "ClassiCube world coordinates fit in i32"
+    )]
+    let goal_cell = Cell {
+        x: player_pos.x.floor() as i32,
+        y: player_pos.y.floor() as i32,
+        z: player_pos.z.floor() as i32,
+    };
+
+    let horiz_dist = (pet_cell.x - goal_cell.x).abs() + (pet_cell.z - goal_cell.z).abs();
+    if horiz_dist > pathfind::MAX_PATH_DISTANCE {
+        return bring_pet_to_player();
+    }
+
+    match pathfind::find_path(
+        &pathfind::WorldGrid,
+        pet_cell,
+        goal_cell,
+        pathfind::MAX_EXPLORED_NODES,
+    ) {
+        Some(cells) if cells.len() >= 2 => {
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "world coordinates (< 65536) fit exactly in f32"
+            )]
+            let waypoints: VecDeque<Vec3> = cells
+                .iter()
+                .map(|c| Vec3 {
+                    x: c.x as f32 + 0.5,
+                    y: c.y as f32,
+                    z: c.z as f32 + 0.5,
+                })
+                .collect();
+            pet.borrow_mut().set_walk_path(waypoints);
+            true
+        }
+        // Pet is already at the goal cell; nothing meaningful to walk.
+        Some(_) => true,
+        // No path found (walled off, fell out of search budget, etc.).
+        None => bring_pet_to_player(),
+    }
 }

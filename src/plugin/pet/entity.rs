@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests;
 
-use std::{mem, os::raw::c_int};
+use std::{collections::VecDeque, mem, os::raw::c_int};
 
 use classicube_sys::{
     Entity, Entity_Init, Entity_SetModel, EntityVTABLE, Lighting, LocationUpdate, Model_Render,
@@ -22,6 +22,9 @@ pub struct PetEntity {
     // VTABLE must be heap-allocated: the entity holds a raw pointer to it that
     // must remain valid for the lifetime of the PetEntity.
     _vtable: Box<EntityVTABLE>,
+    /// Remaining world-space waypoint centers. Empty == idle. Owned plain data;
+    /// dropped automatically with the pet on Free, so reload safety is free.
+    walk_path: VecDeque<Vec3>,
 }
 
 impl PetEntity {
@@ -52,6 +55,7 @@ impl PetEntity {
         Self {
             entity,
             _vtable: vtable,
+            walk_path: VecDeque::new(),
         }
     }
 
@@ -116,11 +120,47 @@ impl PetEntity {
         self.set_model(PET_MODEL);
     }
 
-    /// Called every frame from the render hook to draw the pet at its own
-    /// position with its own model/scale. The pet owns all of its state;
-    /// nothing here reads the local player. Must run on the render thread,
-    /// which the `RenderModel` hook guarantees.
-    pub fn update_and_render(&mut self) {
+    pub fn position(&self) -> Vec3 {
+        self.entity.Position
+    }
+
+    /// Replace the current walk path with `waypoints`. Any in-progress walk is
+    /// discarded; the pet immediately starts heading for the first new waypoint.
+    pub fn set_walk_path(&mut self, waypoints: VecDeque<Vec3>) {
+        self.walk_path = waypoints;
+    }
+
+    #[expect(
+        dead_code,
+        reason = "available for future use; not yet called from pet.rs"
+    )]
+    pub fn is_walking(&self) -> bool {
+        !self.walk_path.is_empty()
+    }
+
+    /// Discard any in-progress walk. Called on map change to avoid the pet
+    /// walking toward stale coordinates from the previous map.
+    pub fn stop_walk(&mut self) {
+        self.walk_path.clear();
+    }
+
+    /// Called every frame from the render hook to advance the walk (if any)
+    /// and draw the pet. `delta` is the frame delta in seconds from ClassiCube's
+    /// `RenderModel` callback. Must run on the render thread.
+    pub fn update_and_render(&mut self, delta: f32) {
+        if !self.walk_path.is_empty() {
+            let pos = self.entity.Position;
+            let pitch = self.entity.Pitch;
+            let yaw = self.entity.Yaw;
+            let body_yaw = self.entity.RotY;
+            let result =
+                super::pathfind::step_walk(pos, pitch, yaw, body_yaw, &mut self.walk_path, delta);
+            self.entity.Position = result.position;
+            // Head looks at the goal; body faces the direction of travel.
+            self.entity.Pitch = result.head_pitch;
+            self.entity.Yaw = result.head_yaw;
+            self.entity.RotY = result.body_yaw;
+        }
         let e = self.entity.as_mut();
         // SAFETY: entity.Model is set at construction by Entity_SetModel and is
         // never null; entity is a valid Entity.
