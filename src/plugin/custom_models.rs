@@ -248,6 +248,27 @@ fn on_undef(state: &mut State, data: &[u8]) {
     }
 }
 
+/// True if `entity`'s active model renders nothing: the `block` model whose
+/// block draws as gas. ClassiCube assigns this (block model + `BLOCK_AIR`) when
+/// a model name fails to resolve (`Entity_SetModel` -> `Entity_SetBlockModel`),
+/// so a bot entity whose model name wasn't registered yet at spawn time looks
+/// identical to a literal `/model air`. Such an entity is invisible; copying it
+/// onto the pet yields an empty pet. FFI, so not test-reachable.
+pub(crate) unsafe fn entity_renders_nothing(entity: &Entity) -> bool {
+    let Some(model) = (unsafe { entity.get_model() }) else {
+        return true;
+    };
+    if model.name.is_null() {
+        return true;
+    }
+    let name = unsafe { CStr::from_ptr(model.name) }.to_string_lossy();
+    if name != "block" {
+        return false;
+    }
+    let mb = entity.get_inner().ModelBlock;
+    unsafe { Blocks.Draw[mb as usize] as DrawType == DrawType_DRAW_GAS }
+}
+
 /// Return `true` if ClassiCube already knows a model by this name -- a built-in
 /// (e.g. "chicken", "humanoid") or any model already registered in models_head.
 /// `Model_Get` returns null for an unknown name. FFI, so not test-reachable.
@@ -372,9 +393,8 @@ pub fn copy_entity_model_to_pet(entity_id: u8) -> Result<CopyOutcome, String> {
     };
 
     // Read the entity's active model name (Model.name, no |scale suffix),
-    // display name, and -- for block models -- the block display name and
-    // draw type (to detect render-nothing gas/air blocks early).
-    let (original_name, entity_name, block_name, is_gas_block) = unsafe {
+    // display name, and -- for block models -- the block display name.
+    let (original_name, entity_name, block_name, is_invisible) = unsafe {
         let Some(entity) = Entity::from_id(entity_id) else {
             return Err("[Pet] Entity not available (are you in a world?)".to_string());
         };
@@ -386,20 +406,19 @@ pub fn copy_entity_model_to_pet(entity_id: u8) -> Result<CopyOutcome, String> {
         }
         let original_name = CStr::from_ptr(model.name).to_string_lossy().into_owned();
         let entity_name = remove_color(entity.get_display_name());
-        let (block_name, is_gas_block) = if original_name == "block" {
+        let block_name = if original_name == "block" {
             let mb = entity.get_inner().ModelBlock;
-            let bname = Block_UNSAFE_GetName(mb).to_string();
-            let is_gas = Blocks.Draw[mb as usize] as DrawType == DrawType_DRAW_GAS;
-            (Some(bname), is_gas)
+            Some(Block_UNSAFE_GetName(mb).to_string())
         } else {
-            (None, false)
+            None
         };
-        (original_name, entity_name, block_name, is_gas_block)
+        let is_invisible = entity_renders_nothing(&entity);
+        (original_name, entity_name, block_name, is_invisible)
     };
 
     // Refuse to copy a model that renders nothing. Mirrors BlockModel_Draw's
     // own early-out: `if (Blocks.Draw[bModel_block] == DRAW_GAS) return;`
-    if is_gas_block {
+    if is_invisible {
         return Err(format!(
             "&c[Pet] '{entity_name}' has an invisible block model ({}) -- nothing to copy",
             block_name.as_deref().unwrap_or("air")

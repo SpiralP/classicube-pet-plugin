@@ -28,13 +28,29 @@ fn name_matches(candidate: &str, query: &str) -> bool {
         .contains(&remove_color(query).to_lowercase())
 }
 
-/// Return the id of the first live entity on the current map whose display name
-/// matches `query` (case-insensitive substring, color codes stripped).
+/// From name-matched candidates `(id, renders_nothing)` in scan order, pick the
+/// first that renders something. Falls back to the first candidate if every
+/// match is invisible, so the caller's "invisible model" error still names a
+/// real entity.
+fn pick_match(candidates: &[(u8, bool)]) -> Option<u8> {
+    candidates
+        .iter()
+        .find(|(_, nothing)| !nothing)
+        .or_else(|| candidates.first())
+        .map(|&(id, _)| id)
+}
+
+/// Return the id of the best live entity on the current map whose display name
+/// matches `query` (case-insensitive substring, color codes stripped). Prefers
+/// a renderable entity over one whose model draws nothing (e.g. a bot whose
+/// model name was not yet registered when it spawned -> block/Air fallback).
 ///
-/// This function touches ClassiCube FFI (`Entities.List`, `Entity::from_id`).
-/// Keep it out of test-reachable code so `--gc-sections` drops the FFI
-/// references and the test binary links cleanly.
+/// This function touches ClassiCube FFI (`Entities.List`, `Entity::from_id`,
+/// `custom_models::entity_renders_nothing`). Keep it out of test-reachable code
+/// so `--gc-sections` drops the FFI references and the test binary links
+/// cleanly.
 fn find_entity_by_name(query: &str) -> Option<u8> {
+    let mut candidates: Vec<(u8, bool)> = Vec::new();
     for id in 0..ENTITIES_MAX_COUNT {
         // ENTITIES_MAX_COUNT == 256; ids fit in u8 (0..=255).
         #[expect(
@@ -48,10 +64,13 @@ fn find_entity_by_name(query: &str) -> Option<u8> {
             continue;
         };
         if name_matches(&entity.get_display_name(), query) {
-            return Some(id);
+            // SAFETY: entity is live for this iteration; entity_renders_nothing
+            // only reads its Model pointer and ModelBlock.
+            let invisible = unsafe { custom_models::entity_renders_nothing(&entity) };
+            candidates.push((id, invisible));
         }
     }
-    None
+    pick_match(&candidates)
 }
 
 /// `/client pet ...` (or `/pet ...`). Bails when the plugin is inactive so a
