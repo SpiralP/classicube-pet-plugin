@@ -8,6 +8,8 @@ use classicube_sys::{
     OwnedString, PACKEDCOL_WHITE, PackedCol, Vec3, cc_bool,
 };
 
+use super::pathfind::Grid as _;
+
 pub(super) const PET_MODEL: &str = "chicken";
 pub(super) const PET_MODEL_SCALE: f32 = 0.5;
 
@@ -155,7 +157,20 @@ impl PetEntity {
             let body_yaw = self.entity.RotY;
             let result =
                 super::pathfind::step_walk(pos, pitch, yaw, body_yaw, &mut self.walk_path, delta);
-            self.entity.Position = result.position;
+            // step_walk advances XZ only; snap Y to the true block surface so
+            // the pet steps crisply at cell edges (no corner gliding) and sits
+            // on partial blocks like slabs. Uses pre-step feet_y as the search
+            // hint (step_walk no longer writes Y, so result.position.y == pos.y).
+            let mut new_pos = result.position;
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "ClassiCube world coordinates fit in i32"
+            )]
+            let (fx, fz) = (new_pos.x.floor() as i32, new_pos.z.floor() as i32);
+            if let Some(surface_y) = super::pathfind::WorldGrid.ground_surface_y(fx, fz, pos.y) {
+                new_pos.y = surface_y;
+            }
+            self.entity.Position = new_pos;
             // Head looks at the goal; body faces the direction of travel.
             self.entity.Pitch = result.head_pitch;
             self.entity.Yaw = result.head_yaw;

@@ -1,4 +1,4 @@
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use classicube_sys::Vec3;
 
@@ -13,6 +13,9 @@ struct FakeGrid {
     height: i32,
     length: i32,
     solid: HashSet<(i32, i32, i32)>,
+    /// Optional per-cell top-surface override (cell-local 0..1 fraction added
+    /// to cell Y). Simulates slabs (0.5), snow (0.25), etc. without FFI.
+    heights: HashMap<(i32, i32, i32), f32>,
 }
 
 impl FakeGrid {
@@ -22,11 +25,18 @@ impl FakeGrid {
             height,
             length,
             solid: HashSet::new(),
+            heights: HashMap::new(),
         }
     }
 
     fn set_solid(&mut self, x: i32, y: i32, z: i32) {
         self.solid.insert((x, y, z));
+    }
+
+    /// Override the top-surface height for a cell. `top` is the cell-local
+    /// fraction (0..1); the world-Y surface = `y + top`.
+    fn set_surface(&mut self, x: i32, y: i32, z: i32, top: f32) {
+        self.heights.insert((x, y, z), top);
     }
 
     /// Fill an entire horizontal layer at `y` with solid blocks.
@@ -45,6 +55,11 @@ impl Grid for FakeGrid {
             return false;
         }
         self.solid.contains(&(x, y, z))
+    }
+
+    fn surface_top(&self, x: i32, y: i32, z: i32) -> f32 {
+        let frac = self.heights.get(&(x, y, z)).copied().unwrap_or(1.0);
+        y as f32 + frac
     }
 }
 
@@ -419,6 +434,9 @@ fn step_walk_body_faces_travel_when_moving_in_positive_z() {
 #[test]
 fn step_walk_keeps_body_yaw_unchanged_for_purely_vertical_move() {
     // Waypoint is directly above; no horizontal movement.
+    // Since step_walk is now horizontal-only, horiz==0 triggers the zero-
+    // horizontal pop path (popped immediately, budget unchanged) rather than a
+    // Y move -- but body_yaw is still not touched, so the assertion holds.
     let target = v(0.0, 5.0, 0.0);
     let mut path = VecDeque::from([target]);
     let result = step_walk(v(0.0, 0.0, 0.0), 0.0, 0.0, 123.0, &mut path, 0.01);
@@ -467,4 +485,103 @@ fn step_walk_head_pitches_toward_a_lower_goal() {
         "head should pitch ~45 down toward the lower goal, got {}",
         result.head_pitch
     );
+}
+
+// ---------------------------------------------------------------------------
+// ground_surface_y
+// ---------------------------------------------------------------------------
+
+#[test]
+fn ground_surface_y_flat_full_block() {
+    let mut g = FakeGrid::new(10, 5, 10);
+    g.set_solid(5, 0, 5);
+    // feet at 1.0 (standing on block top=1.0); should return 1.0.
+    assert_eq!(g.ground_surface_y(5, 5, 1.0), Some(1.0));
+}
+
+#[test]
+fn ground_surface_y_none_over_void() {
+    let g = FakeGrid::new(10, 5, 10);
+    assert_eq!(g.ground_surface_y(5, 5, 1.0), None);
+}
+
+#[test]
+fn ground_surface_y_step_up_one() {
+    // Support block at cell y=1 (top surface = 2.0); pet feet currently at 1.0.
+    // GROUND_STEP_TOLERANCE=0.5: hi = floor(1.5) = 1, which reaches cell 1.
+    let mut g = FakeGrid::new(10, 5, 10);
+    g.set_solid(6, 1, 6);
+    assert_eq!(g.ground_surface_y(6, 6, 1.0), Some(2.0));
+}
+
+#[test]
+fn ground_surface_y_step_down_one() {
+    // Support block at cell y=0 (top=1.0); pet feet currently at 2.0.
+    let mut g = FakeGrid::new(10, 5, 10);
+    g.set_solid(6, 0, 6);
+    assert_eq!(g.ground_surface_y(6, 6, 2.0), Some(1.0));
+}
+
+#[test]
+fn ground_surface_y_step_down_max_fall_boundary_inclusive() {
+    // Support block at exactly floor(feet) - MAX_FALL - 1 (deepest cell in window).
+    // feet=4.0 -> lo = 4 - 3 - 1 = 0; solid at y=0 must be found.
+    let mut g = FakeGrid::new(10, 10, 10);
+    g.set_solid(5, 0, 5);
+    assert_eq!(
+        g.ground_surface_y(5, 5, 4.0),
+        Some(1.0),
+        "solid at lo boundary should be found"
+    );
+}
+
+#[test]
+fn ground_surface_y_step_down_beyond_max_fall_returns_none() {
+    // Support is one cell deeper than the window; should return None.
+    // feet=4.0 -> lo=0; solid only at y=-1 (out of FakeGrid bounds -> not solid).
+    let g = FakeGrid::new(10, 10, 10);
+    assert_eq!(
+        g.ground_surface_y(5, 5, 4.0),
+        None,
+        "nothing within window should yield None"
+    );
+}
+
+#[test]
+fn ground_surface_y_slab_half_height() {
+    // Slab: solid block with a custom surface_top of 0.5 (half-height).
+    // Pet was floating at feet=1.0; should now land at 0.5.
+    let mut g = FakeGrid::new(10, 5, 10);
+    g.set_solid(5, 0, 5);
+    g.set_surface(5, 0, 5, 0.5);
+    assert_eq!(g.ground_surface_y(5, 5, 1.0), Some(0.5));
+}
+
+#[test]
+fn ground_surface_y_returns_highest_when_stacked() {
+    // Two solid cells stacked; from feet=2.0 the search returns the highest one.
+    let mut g = FakeGrid::new(10, 5, 10);
+    g.set_solid(5, 0, 5);
+    g.set_solid(5, 1, 5); // top surface = 2.0
+    // hi = floor(2.5) = 2; search 2..=0 rev => cell 2 (air), cell 1 (solid) first.
+    assert_eq!(g.ground_surface_y(5, 5, 2.0), Some(2.0));
+}
+
+#[test]
+fn ground_surface_y_does_not_grab_ceiling() {
+    // Ceiling block at y=2 must not be returned as the ground.
+    let mut g = FakeGrid::new(10, 5, 10);
+    g.set_solid(5, 0, 5); // ground, top=1.0
+    g.set_solid(5, 2, 5); // ceiling above the headroom cell
+    // feet=1.0 -> hi=floor(1.5)=1; cell 1 is air, cell 0 is the ground.
+    assert_eq!(g.ground_surface_y(5, 5, 1.0), Some(1.0));
+}
+
+#[test]
+fn ground_surface_y_fractional_feet() {
+    // feet=0.999 (slightly below 1.0) with full-block ground at y=0 -> Some(1.0).
+    // Confirms no off-by-one around sub-integer feet values.
+    let mut g = FakeGrid::new(10, 5, 10);
+    g.set_solid(5, 0, 5);
+    assert_eq!(g.ground_surface_y(5, 5, 0.999), Some(1.0));
 }

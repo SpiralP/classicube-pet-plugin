@@ -7,6 +7,8 @@ use classicube_sys::{
     Blocks, CollideType, CollideType_COLLIDE_ICE, CollideType_COLLIDE_SLIPPERY_ICE,
     CollideType_COLLIDE_SOLID, Vec3, World, World_GetBlock,
 };
+
+pub const GROUND_STEP_TOLERANCE: f32 = 0.5; // ClassiCube StepSize (EntityComponents.c:729)
 use pathfinding::prelude::astar;
 
 pub const WALK_SPEED: f32 = 1.0; // blocks/sec
@@ -29,6 +31,35 @@ pub struct Cell {
 /// need not bounds-check before every call.
 pub trait Grid {
     fn is_solid(&self, x: i32, y: i32, z: i32) -> bool;
+
+    /// World-Y of the top face of the (assumed solid) block in cell (x, y, z).
+    /// Default = full cube (`y + 1.0`). `WorldGrid` overrides with `Blocks.MaxBB[block].y`
+    /// so slabs (0.5), snow (0.25), etc. sit at their true surface.
+    fn surface_top(&self, _x: i32, y: i32, _z: i32) -> f32 {
+        y as f32 + 1.0
+    }
+
+    /// World-Y the pet's feet rest on in column (x, z) given current `feet_y`.
+    ///
+    /// Searches from one `GROUND_STEP_TOLERANCE` above the feet (allows
+    /// stepping up) down to `MAX_FALL + 1` cells below (supports the deepest
+    /// reachable step-down). Returns the highest solid cell's `surface_top`, or
+    /// `None` if nothing standable is in range.
+    fn ground_surface_y(&self, x: i32, z: i32, feet_y: f32) -> Option<f32> {
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "ClassiCube world coordinates fit in i32"
+        )]
+        let hi = (feet_y + GROUND_STEP_TOLERANCE).floor() as i32;
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "ClassiCube world coordinates fit in i32"
+        )]
+        let lo = feet_y.floor() as i32 - MAX_FALL - 1;
+        (lo..=hi)
+            .rev()
+            .find_map(|cy| self.is_solid(x, cy, z).then(|| self.surface_top(x, cy, z)))
+    }
 }
 
 fn is_passable<G: Grid>(g: &G, x: i32, y: i32, z: i32) -> bool {
@@ -148,6 +179,9 @@ pub fn find_path<G: Grid>(
 /// absolute facing is `Yaw`. We exploit that to let the pet's body face where
 /// it walks while its head keeps looking at the goal.
 pub struct WalkResult {
+    /// XZ advanced toward the next waypoint; **Y is left equal to the input
+    /// `position.y`** -- the caller is responsible for snapping feet to the
+    /// block surface via `Grid::ground_surface_y`.
     pub position: Vec3,
     /// `entity.Pitch` -- head pitch, tilted toward the goal.
     pub head_pitch: f32,
@@ -176,16 +210,23 @@ fn facing_pitch(dy: f32, horiz: f32) -> f32 {
     (-dy).atan2(horiz).to_degrees()
 }
 
-/// Advance `position` toward the front of `path` over one frame of `delta`
-/// seconds, popping reached waypoints. Caps the per-frame move to
+/// Advance `position` horizontally toward the front of `path` over one frame
+/// of `delta` seconds, popping reached waypoints. Caps the per-frame move to
 /// `MAX_STEP_PER_FRAME` so a stalled frame can't tunnel through walls.
+///
+/// **Y is not written.** The returned `position.y` equals the input. The
+/// caller is responsible for snapping the feet to the block surface each frame
+/// via `Grid::ground_surface_y`; this keeps the pet on top of steps and partial
+/// blocks instead of gliding diagonally through block corners.
 ///
 /// Aims the **body** (`body_yaw` -> `entity.RotY`) at the next waypoint it is
 /// walking toward, and the **head** (`head_pitch`/`head_yaw` ->
 /// `entity.Pitch`/`entity.Yaw`) at the goal -- the last waypoint in `path`,
 /// recomputed from the post-move position so the head tracks the goal as the
-/// pet closes in. Angles that would be undefined (no horizontal component) fall
-/// back to the passed-in current values rather than snapping.
+/// pet closes in. Head aim still reads the goal's Y for pitch so the pet looks
+/// up/down toward higher or lower destinations. Angles that would be undefined
+/// (no horizontal component) fall back to the passed-in current values rather
+/// than snapping.
 pub fn step_walk(
     position: Vec3,
     current_pitch: f32,
@@ -206,34 +247,28 @@ pub fn step_walk(
         let Some(&target) = path.front() else { break };
 
         let dx = target.x - pos.x;
-        let dy = target.y - pos.y;
         let dz = target.z - pos.z;
-        let dist = (dx * dx + dy * dy + dz * dz).sqrt();
+        let horiz = (dx * dx + dz * dz).sqrt();
 
-        if dist < f32::EPSILON {
-            // Duplicate or already-at waypoint; pop without consuming budget.
+        if horiz < f32::EPSILON {
+            // No horizontal component (duplicate or purely-vertical waypoint);
+            // pop without consuming budget. Y is owned by the ground snap.
             path.pop_front();
             continue;
         }
 
-        let horiz = (dx * dx + dz * dz).sqrt();
-
-        if dist <= budget {
-            // Reach this waypoint; face the direction of travel and snap.
-            if horiz > f32::EPSILON {
-                body_yaw = facing_yaw(dx, dz);
-            }
-            pos = target;
-            budget -= dist;
+        if horiz <= budget {
+            // Reach this waypoint; face the direction of travel and snap XZ.
+            body_yaw = facing_yaw(dx, dz);
+            pos.x = target.x;
+            pos.z = target.z;
+            budget -= horiz;
             path.pop_front();
         } else {
-            // Partial move toward waypoint.
-            if horiz > f32::EPSILON {
-                body_yaw = facing_yaw(dx, dz);
-            }
-            let t = budget / dist;
+            // Partial move toward waypoint (XZ only).
+            body_yaw = facing_yaw(dx, dz);
+            let t = budget / horiz;
             pos.x += dx * t;
-            pos.y += dy * t;
             pos.z += dz * t;
             break;
         }
@@ -294,6 +329,14 @@ impl Grid for WorldGrid {
                 || c == CollideType_COLLIDE_ICE
                 || c == CollideType_COLLIDE_SLIPPERY_ICE
         }
+    }
+
+    fn surface_top(&self, x: i32, y: i32, z: i32) -> f32 {
+        // SAFETY: ground_surface_y only calls surface_top for cells where
+        // is_solid returned true, so (x,y,z) is already bounds-checked and
+        // non-air. Mirrors ClassiCube Entity.c spawn logic: feet rest at
+        // cell_y + Blocks.MaxBB[block].y (slabs = 0.5, snow = 0.25, etc.).
+        unsafe { y as f32 + Blocks.MaxBB[World_GetBlock(x, y, z) as usize].y }
     }
 }
 
