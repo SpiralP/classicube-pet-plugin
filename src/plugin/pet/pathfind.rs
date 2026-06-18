@@ -39,26 +39,55 @@ pub trait Grid {
         y as f32 + 1.0
     }
 
-    /// World-Y the pet's feet rest on in column (x, z) given current `feet_y`.
+    /// World-Y the pet's feet rest on, given its horizontal footprint
+    /// `[min_x, max_x] x [min_z, max_z]` (world coords) and current `feet_y`.
     ///
-    /// Searches from one `GROUND_STEP_TOLERANCE` above the feet (allows
-    /// stepping up) down to `MAX_FALL + 1` cells below (supports the deepest
-    /// reachable step-down). Returns the highest solid cell's `surface_top`, or
-    /// `None` if nothing standable is in range.
-    fn ground_surface_y(&self, x: i32, z: i32, feet_y: f32) -> Option<f32> {
+    /// Scans every cell column the footprint overlaps; for each, finds the
+    /// highest solid cell from one `GROUND_STEP_TOLERANCE` above the feet down
+    /// to `MAX_FALL + 1` below, and returns the **maximum** `surface_top`
+    /// across all columns -- mirroring `Respawn_HighestSolidY` (World.c).
+    /// `None` if no column has anything standable in range. Taking the max
+    /// makes the pet step up as soon as its footprint reaches a higher block
+    /// (no model-into-riser clip) and stay supported on a ledge until the
+    /// footprint fully clears it.
+    fn ground_surface_y(
+        &self,
+        min_x: f32,
+        max_x: f32,
+        min_z: f32,
+        max_z: f32,
+        feet_y: f32,
+    ) -> Option<f32> {
         #[expect(
             clippy::cast_possible_truncation,
             reason = "ClassiCube world coordinates fit in i32"
         )]
-        let hi = (feet_y + GROUND_STEP_TOLERANCE).floor() as i32;
+        let (hi, lo) = (
+            (feet_y + GROUND_STEP_TOLERANCE).floor() as i32,
+            feet_y.floor() as i32 - MAX_FALL - 1,
+        );
         #[expect(
             clippy::cast_possible_truncation,
             reason = "ClassiCube world coordinates fit in i32"
         )]
-        let lo = feet_y.floor() as i32 - MAX_FALL - 1;
-        (lo..=hi)
-            .rev()
-            .find_map(|cy| self.is_solid(x, cy, z).then(|| self.surface_top(x, cy, z)))
+        let (cx0, cx1, cz0, cz1) = (
+            min_x.floor() as i32,
+            max_x.floor() as i32,
+            min_z.floor() as i32,
+            max_z.floor() as i32,
+        );
+        let mut best: Option<f32> = None;
+        for cx in cx0..=cx1 {
+            for cz in cz0..=cz1 {
+                if let Some(s) = (lo..=hi).rev().find_map(|cy| {
+                    self.is_solid(cx, cy, cz)
+                        .then(|| self.surface_top(cx, cy, cz))
+                }) {
+                    best = Some(best.map_or(s, |b| b.max(s)));
+                }
+            }
+        }
+        best
     }
 }
 

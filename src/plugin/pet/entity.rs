@@ -157,17 +157,22 @@ impl PetEntity {
             let body_yaw = self.entity.RotY;
             let result =
                 super::pathfind::step_walk(pos, pitch, yaw, body_yaw, &mut self.walk_path, delta);
-            // step_walk advances XZ only; snap Y to the true block surface so
-            // the pet steps crisply at cell edges (no corner gliding) and sits
-            // on partial blocks like slabs. Uses pre-step feet_y as the search
-            // hint (step_walk no longer writes Y, so result.position.y == pos.y).
+            // step_walk advances XZ only; snap Y to the highest block surface
+            // under the pet's *footprint* so it steps up before the model's
+            // leading edge clips into a riser, and stays supported on a ledge
+            // until its base fully clears it. Footprint = Entity.Size (collision
+            // size x ModelScale) centered on Position, matching AABB_Make /
+            // Respawn_HighestSolidY. Uses pre-step feet_y as the search hint.
             let mut new_pos = result.position;
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "ClassiCube world coordinates fit in i32"
-            )]
-            let (fx, fz) = (new_pos.x.floor() as i32, new_pos.z.floor() as i32);
-            if let Some(surface_y) = super::pathfind::WorldGrid.ground_surface_y(fx, fz, pos.y) {
+            let size = self.entity.Size;
+            let (hx, hz) = (size.x * 0.5, size.z * 0.5);
+            if let Some(surface_y) = super::pathfind::WorldGrid.ground_surface_y(
+                new_pos.x - hx,
+                new_pos.x + hx,
+                new_pos.z - hz,
+                new_pos.z + hz,
+                pos.y,
+            ) {
                 new_pos.y = surface_y;
             }
             self.entity.Position = new_pos;

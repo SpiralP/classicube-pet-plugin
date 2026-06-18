@@ -491,18 +491,24 @@ fn step_walk_head_pitches_toward_a_lower_goal() {
 // ground_surface_y
 // ---------------------------------------------------------------------------
 
+/// Sample the column containing cell (x, z): point footprint at cell center.
+fn ground_at<G: Grid>(g: &G, x: i32, z: i32, feet_y: f32) -> Option<f32> {
+    let (cx, cz) = (x as f32 + 0.5, z as f32 + 0.5);
+    g.ground_surface_y(cx, cx, cz, cz, feet_y)
+}
+
 #[test]
 fn ground_surface_y_flat_full_block() {
     let mut g = FakeGrid::new(10, 5, 10);
     g.set_solid(5, 0, 5);
     // feet at 1.0 (standing on block top=1.0); should return 1.0.
-    assert_eq!(g.ground_surface_y(5, 5, 1.0), Some(1.0));
+    assert_eq!(ground_at(&g, 5, 5, 1.0), Some(1.0));
 }
 
 #[test]
 fn ground_surface_y_none_over_void() {
     let g = FakeGrid::new(10, 5, 10);
-    assert_eq!(g.ground_surface_y(5, 5, 1.0), None);
+    assert_eq!(ground_at(&g, 5, 5, 1.0), None);
 }
 
 #[test]
@@ -511,7 +517,7 @@ fn ground_surface_y_step_up_one() {
     // GROUND_STEP_TOLERANCE=0.5: hi = floor(1.5) = 1, which reaches cell 1.
     let mut g = FakeGrid::new(10, 5, 10);
     g.set_solid(6, 1, 6);
-    assert_eq!(g.ground_surface_y(6, 6, 1.0), Some(2.0));
+    assert_eq!(ground_at(&g, 6, 6, 1.0), Some(2.0));
 }
 
 #[test]
@@ -519,7 +525,7 @@ fn ground_surface_y_step_down_one() {
     // Support block at cell y=0 (top=1.0); pet feet currently at 2.0.
     let mut g = FakeGrid::new(10, 5, 10);
     g.set_solid(6, 0, 6);
-    assert_eq!(g.ground_surface_y(6, 6, 2.0), Some(1.0));
+    assert_eq!(ground_at(&g, 6, 6, 2.0), Some(1.0));
 }
 
 #[test]
@@ -529,7 +535,7 @@ fn ground_surface_y_step_down_max_fall_boundary_inclusive() {
     let mut g = FakeGrid::new(10, 10, 10);
     g.set_solid(5, 0, 5);
     assert_eq!(
-        g.ground_surface_y(5, 5, 4.0),
+        ground_at(&g, 5, 5, 4.0),
         Some(1.0),
         "solid at lo boundary should be found"
     );
@@ -541,7 +547,7 @@ fn ground_surface_y_step_down_beyond_max_fall_returns_none() {
     // feet=4.0 -> lo=0; solid only at y=-1 (out of FakeGrid bounds -> not solid).
     let g = FakeGrid::new(10, 10, 10);
     assert_eq!(
-        g.ground_surface_y(5, 5, 4.0),
+        ground_at(&g, 5, 5, 4.0),
         None,
         "nothing within window should yield None"
     );
@@ -554,7 +560,7 @@ fn ground_surface_y_slab_half_height() {
     let mut g = FakeGrid::new(10, 5, 10);
     g.set_solid(5, 0, 5);
     g.set_surface(5, 0, 5, 0.5);
-    assert_eq!(g.ground_surface_y(5, 5, 1.0), Some(0.5));
+    assert_eq!(ground_at(&g, 5, 5, 1.0), Some(0.5));
 }
 
 #[test]
@@ -564,7 +570,7 @@ fn ground_surface_y_returns_highest_when_stacked() {
     g.set_solid(5, 0, 5);
     g.set_solid(5, 1, 5); // top surface = 2.0
     // hi = floor(2.5) = 2; search 2..=0 rev => cell 2 (air), cell 1 (solid) first.
-    assert_eq!(g.ground_surface_y(5, 5, 2.0), Some(2.0));
+    assert_eq!(ground_at(&g, 5, 5, 2.0), Some(2.0));
 }
 
 #[test]
@@ -574,7 +580,7 @@ fn ground_surface_y_does_not_grab_ceiling() {
     g.set_solid(5, 0, 5); // ground, top=1.0
     g.set_solid(5, 2, 5); // ceiling above the headroom cell
     // feet=1.0 -> hi=floor(1.5)=1; cell 1 is air, cell 0 is the ground.
-    assert_eq!(g.ground_surface_y(5, 5, 1.0), Some(1.0));
+    assert_eq!(ground_at(&g, 5, 5, 1.0), Some(1.0));
 }
 
 #[test]
@@ -583,5 +589,45 @@ fn ground_surface_y_fractional_feet() {
     // Confirms no off-by-one around sub-integer feet values.
     let mut g = FakeGrid::new(10, 5, 10);
     g.set_solid(5, 0, 5);
-    assert_eq!(g.ground_surface_y(5, 5, 0.999), Some(1.0));
+    assert_eq!(ground_at(&g, 5, 5, 0.999), Some(1.0));
+}
+
+#[test]
+fn ground_surface_y_footprint_steps_up_when_edge_reaches_higher_block() {
+    // Low block at (5,0,5) surface=1.0; step block at (6,1,5) surface=2.0.
+    // A footprint spanning both cells returns the higher surface; one confined
+    // to the low cell returns the low surface.
+    let mut g = FakeGrid::new(10, 5, 10);
+    g.set_solid(5, 0, 5);
+    g.set_solid(6, 1, 5);
+    assert_eq!(
+        g.ground_surface_y(5.9, 6.1, 5.4, 5.6, 1.0),
+        Some(2.0),
+        "footprint over the step edge should snap up"
+    );
+    assert_eq!(
+        g.ground_surface_y(5.4, 5.6, 5.4, 5.6, 1.0),
+        Some(1.0),
+        "footprint confined to the low cell should stay low"
+    );
+}
+
+#[test]
+fn ground_surface_y_footprint_stays_on_ledge_until_clear() {
+    // High block at (5,1,5) surface=2.0; low block at (6,0,5) surface=1.0.
+    // While the footprint still overlaps the high cell, the max holds at 2.0.
+    // Once the footprint fully clears it, the max drops to 1.0.
+    let mut g = FakeGrid::new(10, 5, 10);
+    g.set_solid(5, 1, 5);
+    g.set_solid(6, 0, 5);
+    assert_eq!(
+        g.ground_surface_y(5.4, 6.1, 5.4, 5.6, 2.0),
+        Some(2.0),
+        "still overlapping the high cell -> stay on the ledge"
+    );
+    assert_eq!(
+        g.ground_surface_y(6.0, 6.4, 5.4, 5.6, 2.0),
+        Some(1.0),
+        "footprint fully cleared the high cell -> drop to low"
+    );
 }
