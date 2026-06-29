@@ -8,7 +8,7 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-anyhow = "=1.0.102"
+anyhow = "=1.0.103"
 borsh = { version = "=1.6.1", features = ["derive"] }
 png = "=0.18.1"
 reqwest = "=0.13.4"
