@@ -12,7 +12,7 @@ anyhow = "=1.0.103"
 borsh = { version = "=1.7.0", features = ["derive"] }
 png = "=0.18.1"
 reqwest = "=0.13.4"
-zerocopy = { version = "=0.8.53", features = ["derive"] }
+zerocopy = { version = "=0.8.54", features = ["derive"] }
 classicube-helpers = { git = "https://github.com/SpiralP/rust-classicube-helpers.git" }
 classicube-relay = { git = "https://github.com/SpiralP/rust-classicube-relay.git" }
 classicube-sys = "=6.0.4"
