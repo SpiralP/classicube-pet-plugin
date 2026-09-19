@@ -9,13 +9,13 @@ crate-type = ["cdylib"]
 
 [dependencies]
 anyhow = "=1.0.104"
-borsh = { version = "=1.7.0", features = ["derive"] }
+borsh = { version = "=1.8.1", features = ["derive"] }
 png = "=0.18.1"
 reqwest = "=0.13.5"
 zerocopy = { version = "=0.8.57", features = ["derive"] }
 classicube-helpers = { git = "https://github.com/SpiralP/rust-classicube-helpers.git" }
 classicube-relay = { git = "https://github.com/SpiralP/rust-classicube-relay.git" }
 classicube-sys = "=6.0.4"
-pathfinding = "=4.15.0"
+pathfinding = "=4.16.0"
 tracing = "=0.1.44"
 tracing-subscriber = { version = "=0.3.23", features = ["env-filter"] }
